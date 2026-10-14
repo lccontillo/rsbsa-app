@@ -33,11 +33,17 @@ CREATE TABLE IF NOT EXISTS id_persons (
     birthdate        TEXT,
     contact_number   TEXT,
     emergency_contact TEXT,
+    affiliated_fca   TEXT,
     photo_path       TEXT,
     source           TEXT NOT NULL DEFAULT 'csv',
     source_farmer_id INTEGER,
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS fca_list (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS id_cards (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,6 +78,9 @@ def init_db() -> None:
                    conn.execute("PRAGMA table_info(id_persons)")}
         if "gender" not in columns:
             conn.execute("ALTER TABLE id_persons ADD COLUMN gender TEXT")
+        if "affiliated_fca" not in columns:
+            conn.execute(
+                "ALTER TABLE id_persons ADD COLUMN affiliated_fca TEXT")
         # The ID database no longer stores barangay fields; Gender replaces
         # them. Drop the obsolete columns from databases created earlier.
         for obsolete in ("barangay_id", "barangay_name"):
@@ -81,6 +90,38 @@ def init_db() -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def normalize_fca(value) -> str:
+    """Standardize an Affiliated FCA name to single-spaced UPPERCASE."""
+    return " ".join(str(value or "").strip().upper().split())
+
+
+def remember_fca(conn, value) -> str:
+    """Normalize an FCA name and remember it in ``fca_list`` if non-empty."""
+    name = normalize_fca(value)
+    if name:
+        conn.execute(
+            "INSERT OR IGNORE INTO fca_list (name, created_at) VALUES (?, ?)",
+            (name, db.now_iso()),
+        )
+    return name
+
+
+def list_fcas(conn) -> list:
+    """Return all remembered FCA entries with member counts."""
+    for row in conn.execute(
+        "SELECT DISTINCT affiliated_fca FROM id_persons "
+        "WHERE affiliated_fca IS NOT NULL AND TRIM(affiliated_fca) <> ''"
+    ).fetchall():
+        remember_fca(conn, row[0])
+    rows = conn.execute(
+        "SELECT f.id, f.name, f.created_at, "
+        "(SELECT COUNT(*) FROM id_persons p WHERE p.affiliated_fca = f.name) "
+        "AS members "
+        "FROM fca_list f ORDER BY f.name ASC"
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def normalize_gender(value):

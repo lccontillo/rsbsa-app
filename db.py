@@ -152,6 +152,7 @@ _FARMER_ID_COLUMNS = (
     ("contact_number", "TEXT"),
     ("emergency_contact", "TEXT"),
     ("blood_type", "TEXT"),
+    ("affiliated_fca", "TEXT"),
 )
 
 # PDF-retention bookkeeping. Database records are NEVER deleted; only the
@@ -236,6 +237,16 @@ def init_db() -> None:
         conn.execute(
             "UPDATE farmers SET verification_status = 'verified' "
             "WHERE verification_status = 'new'")
+    # Standardize municipality/province coverage to Alcala, Cagayan if still
+    # holding the legacy Dagupan/Pangasinan defaults.
+    muni_row = conn.execute(
+        "SELECT value FROM settings WHERE key = 'municipality'").fetchone()
+    if muni_row is None or "dagupan" in (muni_row["value"] or "").lower():
+        set_setting(conn, "municipality", "Alcala")
+    prov_row = conn.execute(
+        "SELECT value FROM settings WHERE key = 'province'").fetchone()
+    if prov_row is None or "pangasinan" in (prov_row["value"] or "").lower():
+        set_setting(conn, "province", "Cagayan")
     conn.commit()
     conn.close()
 
@@ -403,14 +414,12 @@ def create_admin(conn: sqlite3.Connection, username: str, password: str,
     cur = conn.execute(
         "INSERT INTO users (username, password_hash, full_name, role, created_at) "
         "VALUES (?, ?, ?, 'admin', ?)",
-        (username.strip().lower(), generate_password_hash(password),
+        (username.strip(), generate_password_hash(password),
          full_name.strip(), now_iso()),
     )
     admin_id = cur.lastrowid
-    if municipality:
-        set_setting(conn, "municipality", municipality.strip())
-    if province:
-        set_setting(conn, "province", province.strip())
+    set_setting(conn, "municipality", (municipality or "Alcala").strip())
+    set_setting(conn, "province", (province or "Cagayan").strip())
     if barangay_names:
         for name in barangay_names:
             name = name.strip()

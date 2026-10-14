@@ -79,10 +79,29 @@ function _choiceOptionsFor(kind, current) {
 }
 
 /* CAPS standard: text-like data inputs are converted to ALL CAPS as the
-   user types (password/date/number/file controls are untouched). */
+   user types (password/date/number/file controls and .no-caps forms such
+   as Login and Secretary/User creation are untouched). */
 document.addEventListener("input", (e) => {
   const el = e.target;
   if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return;
+  const fieldKey = (el.name || el.dataset.key || el.id || "").toUpperCase();
+  if (fieldKey === "FARM_AREA" || fieldKey === "F_FARM_AREA") {
+    let cleaned = String(el.value || "").replace(/[^0-9.]/g, "");
+    const firstDot = cleaned.indexOf(".");
+    if (firstDot !== -1) {
+      cleaned = cleaned.slice(0, firstDot + 1) +
+                cleaned.slice(firstDot + 1).replace(/\./g, "");
+    }
+    if (cleaned !== el.value) el.value = cleaned;
+    return;
+  }
+  if (el.classList.contains("no-caps") ||
+      el.closest(".no-caps") ||
+      el.closest("#login-form") ||
+      el.closest("#usr-add") ||
+      el.closest("#setup-form")) {
+    return;
+  }
   const type = (el.type || "text").toLowerCase();
   if (el instanceof HTMLInputElement &&
       !["text", "search", "tel", "email", "url", ""].includes(type)) return;
@@ -95,6 +114,163 @@ document.addEventListener("input", (e) => {
     if (start !== null && end !== null) el.setSelectionRange(start, end);
   } catch (_) { /* some control types do not expose a caret */ }
 });
+
+/* Highlight mandatory fields that do not have data input yet for Secretaries */
+function _applyMissingFieldHighlights(container, bannerId = "") {
+  if (!container) return () => 0;
+  const controls = [...container.querySelectorAll(
+    'input:not([type="file"]):not([type="checkbox"]):not([disabled]), ' +
+    'select:not([disabled]), textarea:not([disabled])'
+  )].filter((el) => el.id !== "ap-notes" && el.id !== "entry-type" && el.id !== "prefill-rsbsa");
+
+  function refresh() {
+    let missing = 0;
+    controls.forEach((el) => {
+      const empty = !(el.value || "").toString().trim();
+      const fieldWrap = el.closest(".field");
+      el.classList.toggle("input-missing", empty);
+      if (fieldWrap) {
+        fieldWrap.classList.toggle("field-missing", empty);
+        const lbl = fieldWrap.querySelector("label");
+        if (lbl) {
+          let tag = lbl.querySelector(".missing-tag");
+          if (empty) {
+            if (!tag) {
+              tag = document.createElement("span");
+              tag.className = "missing-tag";
+              tag.textContent = "NEEDS INPUT";
+              lbl.appendChild(tag);
+            }
+          } else if (tag) {
+            tag.remove();
+          }
+        }
+      }
+      if (empty) missing += 1;
+    });
+    if (bannerId) {
+      const banner = document.getElementById(bannerId);
+      if (banner) {
+        banner.innerHTML = missing > 0
+          ? `<div class="notice warn">⚠ <b>${missing} mandatory field${missing > 1 ? "s" : ""} still need${missing === 1 ? "s" : ""} data input</b> (highlighted in amber below). All fields are mandatory for secretaries.</div>`
+          : `<div class="notice" style="background:#ecfdf5;border-color:#10b981;color:#065f46">✓ <b>All mandatory fields have data input</b> — ready to save or approve &amp; issue.</div>`;
+      }
+    }
+    return missing;
+  }
+
+  controls.forEach((el) => {
+    el.addEventListener("input", refresh);
+    el.addEventListener("change", refresh);
+  });
+  refresh();
+  return refresh;
+}
+
+/* Drag-and-drop + Copy-and-Paste (Ctrl+V) helper for ID Photo uploads */
+function _bindPhotoDropAndPaste({ dropId, inputId, previewId, statusId, onFile }) {
+  const dropEl = document.getElementById(dropId);
+  const fileInput = document.getElementById(inputId);
+  const prev = document.getElementById(previewId);
+  const statusEl = document.getElementById(statusId);
+  if (!fileInput) return { getFile: () => null };
+  let chosenFile = null;
+
+  function acceptFile(file, sourceLabel = "Selected") {
+    if (!file || !file.type || !file.type.startsWith("image/")) {
+      toast("Please provide a valid JPG or PNG image.", "err");
+      return;
+    }
+    chosenFile = file;
+    try {
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      fileInput.files = dt.files;
+    } catch (_) { /* fallback uses chosenFile directly */ }
+    if (prev) {
+      prev.src = URL.createObjectURL(file);
+      prev.style.display = "";
+    }
+    if (statusEl) {
+      statusEl.textContent = `${sourceLabel}: ${file.name || "pasted-photo.png"}`;
+      statusEl.style.color = "#065f46";
+      statusEl.style.fontWeight = "600";
+    }
+    if (onFile) onFile(file);
+  }
+
+  fileInput.addEventListener("change", () => {
+    if (fileInput.files && fileInput.files[0]) {
+      acceptFile(fileInput.files[0], "Selected file");
+    }
+  });
+
+  if (dropEl) {
+    dropEl.addEventListener("click", (e) => {
+      if (e.target !== fileInput && e.target.tagName !== "BUTTON") {
+        fileInput.click();
+      }
+    });
+    ["dragenter", "dragover"].forEach((ev) =>
+      dropEl.addEventListener(ev, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropEl.classList.add("dragover");
+      }));
+    ["dragleave", "drop"].forEach((ev) =>
+      dropEl.addEventListener(ev, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropEl.classList.remove("dragover");
+      }));
+    dropEl.addEventListener("drop", (e) => {
+      const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) {
+        acceptFile(f, "Dropped photo");
+        toast("ID photo added via drag & drop.");
+      }
+    });
+  }
+
+  const onPaste = (e) => {
+    if (!document.body.contains(fileInput)) {
+      document.removeEventListener("paste", onPaste);
+      return;
+    }
+    const items = (e.clipboardData && e.clipboardData.items) || [];
+    for (const item of items) {
+      if (item.type && item.type.startsWith("image/")) {
+        const blob = item.getAsFile();
+        if (blob) {
+          e.preventDefault();
+          const ext = blob.type === "image/jpeg" ? ".jpg" : ".png";
+          const named = new File([blob], `pasted_id_photo${ext}`, { type: blob.type });
+          acceptFile(named, "Pasted from clipboard");
+          toast("ID photo pasted from clipboard!");
+          break;
+        }
+      }
+    }
+  };
+  document.addEventListener("paste", onPaste);
+
+  return {
+    getFile: () => chosenFile || (fileInput.files && fileInput.files[0]) || null,
+  };
+}
+
+const FCA_CACHE_KEY = "rsbsa_fcas_v1";
+async function fetchFcaNames() {
+  try {
+    const r = await api("/api/fcas");
+    const names = (r && r.names) || [];
+    try { localStorage.setItem(FCA_CACHE_KEY, JSON.stringify(names)); } catch (_) {}
+    return names;
+  } catch (_) {
+    try { return JSON.parse(localStorage.getItem(FCA_CACHE_KEY) || "[]"); }
+    catch (__) { return []; }
+  }
+}
 
 async function api(path, opts = {}) {
   const init = { method: opts.method || "GET", headers: {} };
@@ -531,23 +707,23 @@ function viewSetup() {
       <div class="card">
         <h3>Initial setup — create the administrator account</h3>
         <p class="page-sub">This runs only once. You will be signed in automatically.</p>
-        <form id="setup-form">
+        <form id="setup-form" class="no-caps">
           <div class="form-grid">
             <div class="field full">
               <label>Office / Institution name</label>
-              <input name="municipality" placeholder="e.g. City of Dagupan">
+              <input name="municipality" value="Alcala" placeholder="e.g. Alcala">
             </div>
             <div class="field full">
               <label>Province</label>
-              <input name="province" placeholder="e.g. Pangasinan">
+              <input name="province" value="Cagayan" placeholder="e.g. Cagayan">
             </div>
             <div class="field">
               <label>Admin full name <span class="req">*</span></label>
-              <input name="full_name" required placeholder="Juan Dela Cruz">
+              <input name="full_name" class="no-caps" required placeholder="Juan Dela Cruz">
             </div>
             <div class="field">
               <label>Username <span class="req">*</span></label>
-              <input name="username" required autocomplete="username"
+              <input name="username" class="no-caps" required autocomplete="username"
                      placeholder="admin">
             </div>
             <div class="field">
@@ -593,14 +769,14 @@ function viewLogin() {
     <div class="center-narrow">
       <div class="card">
         <h3>Secretary / Administrator sign in</h3>
-        <form id="login-form">
+        <form id="login-form" class="no-caps">
           <div class="field">
             <label>Username</label>
-            <input name="username" required autofocus autocomplete="username">
+            <input name="username" class="no-caps" required autofocus autocomplete="username">
           </div>
           <div class="field">
             <label>Password</label>
-            <input name="password" type="password" required autocomplete="current-password">
+            <input name="password" class="no-caps" type="password" required autocomplete="current-password">
           </div>
           <button class="btn btn-primary btn-block" type="submit">Sign in</button>
         </form>
@@ -651,8 +827,8 @@ function collectCurrentEntry() {
   const entry = {};
   W.fields.forEach((f) => {
     let v = (fd.get(f.key) || "").toString().trim();
-    if (v && (f.type === "text" || f.type === "textarea")) {
-      v = v.toUpperCase();                  // standardize to caps
+    if (v && (f.type === "text" || f.type === "textarea" || _isRsbsaFieldKey(f.key))) {
+      v = v.toUpperCase();                  // standardize to caps (including alphanumeric RSBSA)
     }
     if (v) entry[f.key] = v;
   });
@@ -714,7 +890,7 @@ const FIL_BY_KEY = {
   RSBSA_NUMBER: "Numero ng RSBSA",
   RSBSA_NO: "Numero ng RSBSA",
   PARCEL_LOCATION: "Lokasyon ng Parsela",
-  FARM_AREA: "Lawak ng Lupa",
+  FARM_AREA: "Lawak ng Lupa (Ektarya)",
   PURPOSE: "Layunin",
   CROP_COMMODITY: "Pananim",
   CONTACT_NUMBER: "Numero ng Telepono",
@@ -732,7 +908,8 @@ const FIL_BY_LABEL = {
   "rsbsa number": "Numero ng RSBSA",
   "rsbsa no": "Numero ng RSBSA",
   "parcel location": "Lokasyon ng Parsela",
-  "farm area": "Lawak ng Lupa",
+  "farm area": "Lawak ng Lupa (Ektarya)",
+  "farm area (ha)": "Lawak ng Lupa (Ektarya)",
   "purpose": "Layunin",
   "crop commodity": "Pananim",
   "contact number": "Numero ng Telepono",
@@ -747,25 +924,50 @@ function biLabel(f) {
 }
 
 function ensureParcelFields(fields) {
-  const out = fields.slice();
+  const out = fields.map((f) => {
+    if (f.key === "FARM_AREA") {
+      return {
+        ...f,
+        label: "Farm Area (Ha)",
+        type: "number",
+        help: "Numerical value only in hectares (e.g. 0.2526). One entry per parcel. (Numerikal na halaga lamang sa ektarya, hal. 0.2526.)",
+      };
+    }
+    if (_isRsbsaFieldKey(f.key)) {
+      return { ...f, type: "text" };
+    }
+    return f;
+  });
   const has = (k) => out.some((f) => f.key === k);
   if (!has("FARM_AREA")) {
-    out.push({ key: "FARM_AREA", label: "Farm Area", type: "text",
+    out.push({ key: "FARM_AREA", label: "Farm Area (Ha)", type: "number",
                required: true, system: false,
-               help: "Area of this parcel (e.g. 1.5 HECTARES). One entry per parcel. (Lawak ng parselang ito (hal. 1.5 EKTARYA). Isang entry bawat parsela.)" });
+               help: "Numerical value only in hectares (e.g. 0.2526). One entry per parcel. (Numerikal na halaga lamang sa ektarya, hal. 0.2526.)" });
   }
   if (!has("PARCEL_LOCATION")) {
     const idx = out.findIndex((f) => f.key === "FARM_AREA");
     out.splice(idx >= 0 ? idx + 1 : out.length, 0,
       { key: "PARCEL_LOCATION", label: "Parcel Location", type: "text",
         required: true, system: false,
-        help: "Where this parcel is located (sitio/purok and barangay). Each parcel entry has its own location. (Kung saan matatagpuan ang parsela (sitio/purok at barangay). Bawat parsela ay may sariling lokasyon.)" });
+        help: "Automatically pre-filled with the barangay (editable). (Awtomatikong napunan ng barangay.)" });
   }
   return out;
 }
 
+function _defaultParcelLocation() {
+  return ((W.barangayName || (ME && ME.barangay) || "")).trim().toUpperCase();
+}
+
 function propagateProfile() {
   const src = (W.entries[0] || {}).data || {};
+  const defLoc = _defaultParcelLocation();
+  if (defLoc) {
+    const wrap0 = W.entries[0] || (W.entries[0] = { tpl: null, data: {} });
+    const dst0 = wrap0.data || (wrap0.data = {});
+    if (!dst0.PARCEL_LOCATION && !W.manual["0:PARCEL_LOCATION"]) {
+      dst0.PARCEL_LOCATION = defLoc;
+    }
+  }
   const keys = Object.keys(src).filter((k) => _isProfileField({ key: k }));
   for (let i = 1; i < W.count; i++) {
     const wrap = W.entries[i] || (W.entries[i] = { tpl: null, data: {} });
@@ -775,6 +977,9 @@ function propagateProfile() {
       if (src[k]) dst[k] = src[k];
       else delete dst[k];
     });
+    if (defLoc && !dst.PARCEL_LOCATION && !W.manual[`${i}:PARCEL_LOCATION`]) {
+      dst.PARCEL_LOCATION = defLoc;
+    }
   }
 }
 
@@ -809,7 +1014,7 @@ function farmerEntryModal({ rsbsa = "", barangayId = null, barangayName = "",
     <p class="small muted">${esc(ruleText)}</p>
     <div class="form-grid">
       <div class="field"><label>RSBSA Number (Numero ng RSBSA)${star}</label>
-        <input type="text" id="fe-rsbsa" class="caps" value="${esc(rsbsa)}"></div>
+        <input type="text" id="fe-rsbsa" class="caps" placeholder="e.g. 02-015-02-014-EFMN47" value="${esc(rsbsa)}"></div>
       ${bgyField}
       <div class="field"><label>Farmer Name (Pangalan ng Magsasaka) *</label>
         <input type="text" id="fe-name" class="caps" placeholder="e.g. JUAN DELA CRUZ"></div>
@@ -822,6 +1027,9 @@ function farmerEntryModal({ rsbsa = "", barangayId = null, barangayName = "",
       <button class="btn" id="fe-cancel">Cancel (Kanselahin)</button>
       <button class="btn btn-primary" id="fe-save">Save to Farmer Database (I-save sa Database ng mga Magsasaka)</button>
     </div>`, 640);
+  if (secretaryStrict) {
+    _applyMissingFieldHighlights(document.querySelector(".modal"));
+  }
   bind("fe-cancel", "click", closeModal);
   bind("fe-save", "click", async () => {
     const num = (document.getElementById("fe-rsbsa").value || "").trim().toUpperCase();
@@ -883,13 +1091,15 @@ function extractRsbsaNumber(raw) {
     }
     text = `${u.pathname} ${text}`;
   } catch (_) { /* not a URL */ }
-  let m = text.match(/RSBSA[^0-9]*(\d[\d\- ]{3,}\d)/i);
-  if (m) return m[1].replace(/\s+/g, "").toUpperCase();
-  m = text.match(/RSBSA[^A-Z0-9]*([A-Z0-9]+(?:-[A-Z0-9]+)+)/i);
+  let m = text.match(/validate-rsbsa-profile\/([A-Z0-9][A-Z0-9\-_./]{3,})/i);
+  if (m) return m[1].trim().toUpperCase();
+  m = text.match(/RSBSA[^A-Z0-9]*([A-Z0-9][A-Z0-9\-_./ ]{3,}[A-Z0-9])/i);
+  if (m && /\d/.test(m[1])) return m[1].replace(/\s+/g, "").toUpperCase();
+  m = text.match(/\b([A-Z0-9]+(?:-[A-Z0-9]+){2,})\b/i);
   if (m && /\d/.test(m[1])) return m[1].toUpperCase();
   m = text.match(/\b\d[\d\- ]{4,}\d\b/);
   if (m) return m[0].replace(/\s+/g, "").toUpperCase();
-  m = text.match(/[A-Z0-9][A-Z0-9\-]{3,}/i);
+  m = text.match(/[A-Z0-9][A-Z0-9\-_./]{3,}/i);
   return m ? m[0].toUpperCase() : "";
 }
 
@@ -1004,6 +1214,10 @@ async function viewSubmit() {
     try { W.barangays = await api("/api/barangays"); rememberBarangays(W.barangays); }
     catch (err) { toast(err.message, "err"); return; }
   }
+  if (!W.barangay && ME && ME.role === "secretary" && ME.barangay_id) {
+    W.barangay = Number(ME.barangay_id);
+    W.barangayName = ME.barangay || "";
+  }
   if (W.step === 3 && !W.templates.length) {
     $app.innerHTML = `<div class="loading">Loading…</div>`;
     try { W.templates = await api("/api/public/templates"); }
@@ -1090,15 +1304,24 @@ async function viewSubmit() {
           !W.manual[`${W.curIdx}:${f.key}`]) {
         help += `<div class="help">Auto-filled from Entry 1 — edit only if this parcel's certificate must differ. (Awtomatikong napunan mula sa Entry 1 — baguhin lamang kung kailangang maiba ang sertipiko ng parselang ito.)</div>`;
       }
-      const valRaw = ((W.entries[W.curIdx] || {}).data || {})[f.key] || "";
+      const curData = (W.entries[W.curIdx] || {}).data || {};
+      if (f.key === "PARCEL_LOCATION" && !curData.PARCEL_LOCATION &&
+          !W.manual[`${W.curIdx}:PARCEL_LOCATION`] && _defaultParcelLocation()) {
+        curData.PARCEL_LOCATION = _defaultParcelLocation();
+      }
+      const valRaw = curData[f.key] || "";
       const val = esc(valRaw);
-      const caps = (f.type === "text" || f.type === "textarea") ? "caps" : "";
+      const isRsbsa = _isRsbsaFieldKey(f.key);
+      const isFarmArea = f.key.toUpperCase() === "FARM_AREA";
+      const caps = (f.type === "text" || f.type === "textarea" || isRsbsa) ? "caps" : "";
       const v = `class="${caps}" name="${esc(f.key)}" id="f_${esc(f.key)}" ${(staffStrictSubmit || _isFarmerNameField(f)) ? "required" : ""}`;
       const choiceKind = _choiceKind(f.key);
       let input;
       if (choiceKind) input = `<select class="caps" name="${esc(f.key)}" id="f_${esc(f.key)}" ${(staffStrictSubmit || _isFarmerNameField(f)) ? "required" : ""}>${_choiceOptionsFor(choiceKind, valRaw)}</select>`;
       else if (f.type === "textarea") input = `<textarea ${v} rows="3">${val}</textarea>`;
       else if (f.type === "date") input = `<input type="date" ${v} value="${val}">`;
+      else if (isFarmArea) input = `<input type="number" step="any" min="0" inputmode="decimal" placeholder="e.g. 0.2526" ${v} value="${val}">`;
+      else if (isRsbsa) input = `<input type="text" placeholder="e.g. 02-015-02-014-EFMN47" ${v} value="${val}">`;
       else if (f.type === "number") input = `<input type="number" step="any" ${v} value="${val}">`;
       else input = `<input type="text" ${v} value="${val}">`;
       const cls = f.type === "textarea" ? "field full" : "field";
@@ -1142,7 +1365,7 @@ async function viewSubmit() {
         <div class="prefill-box">
           <div class="field">
             <label>Your RSBSA Number — type it, scan the QR code, or upload a QR photo (Ang Iyong Numero ng RSBSA — itype ito, i-scan ang QR code, o mag-upload ng larawan ng QR)</label>
-            <input type="text" id="prefill-rsbsa" placeholder="e.g. 0123456789" value="${esc(W.prefillNum || "")}">
+            <input type="text" id="prefill-rsbsa" class="caps" placeholder="e.g. 02-015-02-014-EFMN47" value="${esc(W.prefillNum || "")}">
             <div class="qr-hint">Scanning fills in Entry 1 and copies your profile to all parcel entries. (Pupunan ng scan ang Entry 1 at kokopyahin ang iyong profile sa lahat ng parsela.)</div>
           </div>
           <button type="button" class="btn" id="prefill-go">Fetch my details (Kunin ang Aking mga Detalye)</button>
@@ -1217,8 +1440,16 @@ async function viewSubmit() {
   if (W.step === 1) {
     document.querySelectorAll(".pick").forEach((el) =>
       el.addEventListener("click", () => {
+        const oldBgyUpper = (W.barangayName || "").trim().toUpperCase();
         W.barangay = Number(el.dataset.id);
         W.barangayName = el.dataset.name;
+        const newBgyUpper = (W.barangayName || "").trim().toUpperCase();
+        (W.entries || []).forEach((e, idx) => {
+          if (e && e.data && (!e.data.PARCEL_LOCATION || e.data.PARCEL_LOCATION === oldBgyUpper) &&
+              !W.manual[`${idx}:PARCEL_LOCATION`]) {
+            e.data.PARCEL_LOCATION = newBgyUpper;
+          }
+        });
         viewSubmit();
       }));
     bind("go2", "click", () => { W.step = 2; viewSubmit(); });
@@ -1293,6 +1524,9 @@ async function viewSubmit() {
         }
       });
     });
+    if (staffStrictSubmit) {
+      _applyMissingFieldHighlights(document.getElementById("details-form"));
+    }
     bind("qr-scan", "click", startQrScan);
     bind("qr-upload-btn", "click", () =>
       document.getElementById("qr-file").click());
@@ -1616,7 +1850,13 @@ async function viewReview(id) {
     (t.fields || []).forEach((f) => { typeByKey[f.key] = f.type; }));
   const entries = (r.entries && r.entries.length) ? r.entries : [r.data || {}];
   let orig = JSON.parse(JSON.stringify(entries));
-  let dirty = false;
+  const defaultParcelLoc = (r.barangay || (ME && ME.barangay) || "").trim().toUpperCase();
+  entries.forEach((e) => {
+    if (e && !String(e.PARCEL_LOCATION || "").trim() && defaultParcelLoc) {
+      e.PARCEL_LOCATION = defaultParcelLoc;
+    }
+  });
+  let dirty = JSON.stringify(entries) !== JSON.stringify(orig);
 
   const today = new Date().toLocaleDateString("en-PH", {
     month: "long", day: "numeric", year: "numeric" });
@@ -1640,21 +1880,31 @@ async function viewReview(id) {
   const reqStar = pending ? ' <span class="req">*</span>' : "";
   const entryBlocks = entries.map((entry, i) => {
     const info = (r.entry_templates || [])[i];
-    const efields = info ? info.fields.filter((f) => !f.system) : farmerFields;
+    const efields = ensureParcelFields(
+      info ? info.fields.filter((f) => !f.system) : farmerFields
+    );
     const rows = efields.map((f) => {
-      const val = esc(entry[f.key] || "");
-      const caps = (f.type === "text" || f.type === "textarea") ? " caps" : "";
+      const rawVal = (f.key === "PARCEL_LOCATION" && !entry[f.key] && defaultParcelLoc)
+        ? defaultParcelLoc
+        : (entry[f.key] || "");
+      const val = esc(rawVal);
+      const isRsbsa = _isRsbsaFieldKey(f.key);
+      const isFarmArea = f.key.toUpperCase() === "FARM_AREA";
+      const labelText = isFarmArea ? "Farm Area (Ha)" : f.label;
+      const caps = (f.type === "text" || f.type === "textarea" || isRsbsa) ? " caps" : "";
       const dis = pending ? " required" : " disabled";
       const common = `class="rectify-input${caps}" data-ei="${i}" data-key="${esc(f.key)}"${dis}`;
       const choiceKind = _choiceKind(f.key);
       let input;
-      if (choiceKind) input = `<select ${common}>${_choiceOptionsFor(choiceKind, entry[f.key] || "")}</select>`;
+      if (choiceKind) input = `<select ${common}>${_choiceOptionsFor(choiceKind, rawVal)}</select>`;
       else if (f.type === "textarea") input = `<textarea ${common} rows="3">${val}</textarea>`;
       else if (f.type === "date") input = `<input type="date" ${common} value="${val}">`;
+      else if (isFarmArea) input = `<input type="number" step="any" min="0" inputmode="decimal" placeholder="e.g. 0.2526" ${common} value="${val}">`;
+      else if (isRsbsa) input = `<input type="text" placeholder="e.g. 02-015-02-014-EFMN47" ${common} value="${val}">`;
       else if (f.type === "number") input = `<input type="number" step="any" ${common} value="${val}">`;
       else input = `<input type="text" ${common} value="${val}">`;
       const cls = f.type === "textarea" ? "field full" : "field";
-      return `<div class="${cls}"><label>${esc(f.label)}${reqStar}</label>${input}</div>`;
+      return `<div class="${cls}"><label>${esc(labelText)}${reqStar}</label>${input}</div>`;
     }).join("");
     const name = entry.FARMER_NAME ||
       Object.entries(entry).find(([k]) => k.includes("NAME"))?.[1] || "";
@@ -1697,8 +1947,9 @@ async function viewReview(id) {
            entry before issuing — fix anything the farmer mistyped. Saved
            corrections are written to the audit trail. All text is
            standardized to <b>CAPITAL LETTERS</b>. <b>All information
-           fields must be filled</b> before saving or issuing.</div>` : ""}
-        ${entryBlocks}
+           fields must be filled</b> before saving or issuing.</div>
+           <div id="review-missing-banner"></div>` : ""}
+        <div id="review-entries-wrap">${entryBlocks}</div>
       </div>
       <div>
         <div class="card">
@@ -1759,8 +2010,15 @@ async function viewReview(id) {
     dirty = JSON.stringify(collect()) !== JSON.stringify(orig);
     if (saveBtn) saveBtn.disabled = !dirty;
   }
-  document.querySelectorAll(".rectify-input").forEach((el) =>
-    el.addEventListener("input", markDirty));
+  const checkMissing = _applyMissingFieldHighlights(
+    document.getElementById("review-entries-wrap"),
+    "review-missing-banner"
+  );
+  markDirty();
+  document.querySelectorAll(".rectify-input").forEach((el) => {
+    el.addEventListener("input", markDirty);
+    el.addEventListener("change", markDirty);
+  });
 
   async function saveCorrections() {
     const payload = collect();
@@ -1781,6 +2039,10 @@ async function viewReview(id) {
 
   bind("btn-save", "click", saveCorrections);
   bind("btn-approve", "click", async () => {
+    if (checkMissing() > 0) {
+      toast("All fields are mandatory for secretaries — please fill in all highlighted fields before issuing.", "err");
+      return;
+    }
     if (dirty && !(await saveCorrections())) return;
     approveModal(r, entries.length);
   });
@@ -2192,11 +2454,19 @@ async function farmerIdModal(f, onDone) {
         <div class="field"><label>Contact Person in Case of Emergency (Name — Number)</label>
           <input id="fid-emergency" class="caps" value="${esc(f.emergency_contact || "")}" placeholder="MARIA CRUZ - 0917 123 4567"></div>
       </div>
-      <div class="field"><label>ID Photo (JPG/PNG)</label>
-        <div class="actions">
+      <div class="field full"><label>Farmer's Affiliated FCA (printed below QR code at the back of the ID)</label>
+        <input id="fid-fca" class="caps" list="fid-fca-datalist" value="${esc(f.affiliated_fca || "")}" placeholder="Select or type FCA name (e.g. ALCALA FARMERS COOPERATIVE)">
+        <datalist id="fid-fca-datalist"></datalist>
+      </div>
+      <div class="field"><label>ID Photo (JPG/PNG) — Browse, Drag &amp; Drop, or Copy &amp; Paste (Ctrl+V)</label>
+        <div class="photo-dropzone" id="fid-photo-drop" tabindex="0">
           ${f.photo_path ? `<img class="id-thumb" src="/api/farmers/${f.id}/photo?v=${bust}" alt="Farmer photo">` : `<span class="small muted">No photo yet — the card will show a silhouette.</span>`}
           <img class="id-thumb" id="fid-photo-preview" alt="" style="display:none">
-          <input type="file" id="fid-photo" accept="image/png,image/jpeg">
+          <div style="flex:1;min-width:200px">
+            <div style="font-weight:600;font-size:13px">Drag &amp; drop a photo here, press <b>Ctrl+V</b> to paste an image, or browse:</div>
+            <input type="file" id="fid-photo" accept="image/png,image/jpeg,image/webp" style="margin-top:6px">
+            <div class="small muted" id="fid-photo-status">Supports JPG, PNG, or pasted clipboard images</div>
+          </div>
         </div>
       </div>
       ${hasId ? "" : `<div class="field"><label>Validity</label>
@@ -2213,14 +2483,15 @@ async function farmerIdModal(f, onDone) {
       <button class="btn btn-primary" id="fid-go" type="button">${hasId ? "🖨 Reprint ID Card" : "🪪 Generate ID Card"}</button>
     </div>`, 800);
   bind("fid-close", "click", closeModal);
-  const fileInput = document.getElementById("fid-photo");
-  fileInput.addEventListener("change", () => {
-    const file = fileInput.files[0];
-    const prev = document.getElementById("fid-photo-preview");
-    if (file && prev) {
-      prev.src = URL.createObjectURL(file);
-      prev.style.display = "";
-    }
+  fetchFcaNames().then((names) => {
+    const dl = document.getElementById("fid-fca-datalist");
+    if (dl) dl.innerHTML = names.map((n) => `<option value="${esc(n)}"></option>`).join("");
+  });
+  const photoHelper = _bindPhotoDropAndPaste({
+    dropId: "fid-photo-drop",
+    inputId: "fid-photo",
+    previewId: "fid-photo-preview",
+    statusId: "fid-photo-status",
   });
   bind("fid-go", "click", async () => {
     const btn = document.getElementById("fid-go");
@@ -2228,6 +2499,7 @@ async function farmerIdModal(f, onDone) {
       birthdate: document.getElementById("fid-birthdate").value,
       contact_number: document.getElementById("fid-contact").value.trim(),
       emergency_contact: document.getElementById("fid-emergency").value.trim(),
+      affiliated_fca: (document.getElementById("fid-fca").value || "").trim().toUpperCase(),
     };
     btn.disabled = true;
     btn.textContent = "Generating…";
@@ -2240,7 +2512,7 @@ async function farmerIdModal(f, onDone) {
           civil_status: f.civil_status || "", address: f.address || "",
           barangay_id: f.barangay_id, ...extras } });
       }
-      const file = fileInput.files[0];
+      const file = photoHelper.getFile();
       if (file) {
         const fd = new FormData();
         fd.append("photo", file);
@@ -2506,12 +2778,13 @@ async function viewIdGenerator() {
         <input type="file" id="idg-csv" accept=".csv,text/csv">
         <button class="btn btn-primary" id="idg-import">Upload CSV</button>
         <button class="btn" id="idg-copy">Copy from Farmer Masterlist</button>
+        <button class="btn" id="idg-manage-fcas" type="button">🌾 Manage Affiliated FCAs</button>
       </div>
       <p class="small muted">CSV uploads <b>add new records only</b> — rows whose
          RSBSA Number is already in the ID database are skipped and reported,
          never overwritten. Use the CSV columns needed for ID generation:
          <b>RSBSA Number, Farmer Name, Gender, Civil Status, Address,
-         Birthdate, Contact Number, and Contact Person in Case of Emergency</b>
+         Birthdate, Contact Number, Contact Person in Case of Emergency, and Affiliated FCA</b>
          (Birthdate should be YYYY-MM-DD). Any blank ID detail, and the
          photo, can be completed per person below.</p>
       <div id="idg-import-result"></div>
@@ -2552,6 +2825,7 @@ async function viewIdGenerator() {
                   ${p.birthdate ? "Birthdate ✓" : "Birthdate —"}<br>
                   ${p.contact_number ? "Contact ✓" : "Contact —"} ·
                   ${p.emergency_contact ? "Emergency ✓" : "Emergency —"} ·
+                  ${p.affiliated_fca ? `FCA: ${esc(p.affiliated_fca)} ✓` : "FCA —"} ·
                   ${p.has_photo ? "Photo ✓" : "Photo —"}</td>
               <td>${p.id_control_no
                 ? `<span class="badge blue mono">${esc(p.id_control_no)}</span>
@@ -2606,6 +2880,10 @@ async function viewIdGenerator() {
     btn.disabled = false; btn.textContent = "Upload CSV";
   });
   bind("idg-copy", "click", () => idGenCopyModal(loadPersons));
+  bind("idg-manage-fcas", "click", () => {
+    adminTab = "fcas";
+    location.hash = "#/admin";
+  });
   await loadPersons();
 }
 
@@ -2711,13 +2989,29 @@ function idGenPersonModal(p, onDone) {
         <div class="field"><label>Contact Person in Case of Emergency (Name — Number)</label>
           <input id="idg-emergency" class="caps" value="${esc(p.emergency_contact || "")}" placeholder="MARIA CRUZ - 0917 123 4567"></div>
         <div class="field full"><label>Address</label>
-          <input id="idg-address" class="caps" value="${esc(p.address || "")}" placeholder="PUROK / SITIO, BARANGAY"></div>
+          <input id="idg-address" class="caps" value="${esc(p.address || "")}" placeholder="PUROK / SITIO, BARANGAY, ALCALA, CAGAYAN"></div>
+        <div class="field full">
+          <label>Farmer's Affiliated FCA (printed below QR code on the back of the ID)</label>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <input id="idg-fca" class="caps" list="idg-fca-datalist" value="${esc(p.affiliated_fca || "")}"
+                   placeholder="Type FCA name or pick a saved FCA →" style="flex:2;min-width:220px">
+            <select id="idg-fca-pick" class="caps" style="flex:1;min-width:190px">
+              <option value="">— Saved FCAs —</option>
+            </select>
+          </div>
+          <datalist id="idg-fca-datalist"></datalist>
+          <div class="help">New FCA names typed here are automatically remembered for future IDs. You can also edit the FCA list under <b>Administration → Affiliated FCAs</b>.</div>
+        </div>
       </div>
-      <div class="field"><label>ID Photo (JPG/PNG)</label>
-        <div class="actions">
+      <div class="field"><label>ID Photo (JPG/PNG) — Browse, Drag &amp; Drop, or Copy &amp; Paste (Ctrl+V)</label>
+        <div class="photo-dropzone" id="idg-photo-drop" tabindex="0">
           ${p.has_photo ? `<img class="id-thumb" src="/api/id-generator/persons/${p.id}/photo?v=${bust}" alt="ID photo">` : `<span class="small muted">No photo yet — the card will show a silhouette.</span>`}
           <img class="id-thumb" id="idg-photo-preview" alt="" style="display:none">
-          <input type="file" id="idg-photo" accept="image/png,image/jpeg">
+          <div style="flex:1;min-width:200px">
+            <div style="font-weight:600;font-size:13px">Drag &amp; drop a photo here, press <b>Ctrl+V</b> to paste an image, or browse:</div>
+            <input type="file" id="idg-photo" accept="image/png,image/jpeg,image/webp" style="margin-top:6px">
+            <div class="small muted" id="idg-photo-status">Supports JPG, PNG, or pasted clipboard images</div>
+          </div>
         </div>
       </div>
       ${hasId ? "" : `<div class="field"><label>Validity</label>
@@ -2732,11 +3026,24 @@ function idGenPersonModal(p, onDone) {
       <button class="btn btn-primary" id="idg-go" type="button">${hasId ? "🖨 Reprint ID Card" : "🪪 Generate ID Card"}</button>
     </div>`, 800);
   bind("idg-close", "click", closeModal);
-  const fileInput = document.getElementById("idg-photo");
-  fileInput.addEventListener("change", () => {
-    const file = fileInput.files[0];
-    const prev = document.getElementById("idg-photo-preview");
-    if (file && prev) { prev.src = URL.createObjectURL(file); prev.style.display = ""; }
+  fetchFcaNames().then((names) => {
+    const dl = document.getElementById("idg-fca-datalist");
+    const sel = document.getElementById("idg-fca-pick");
+    const cur = (p.affiliated_fca || "").toUpperCase();
+    if (dl) dl.innerHTML = names.map((n) => `<option value="${esc(n)}"></option>`).join("");
+    if (sel) {
+      sel.innerHTML = `<option value="">— Saved FCAs (${names.length}) —</option>` +
+        names.map((n) => `<option value="${esc(n)}" ${n === cur ? "selected" : ""}>${esc(n)}</option>`).join("");
+      sel.addEventListener("change", () => {
+        if (sel.value) document.getElementById("idg-fca").value = sel.value;
+      });
+    }
+  });
+  const photoHelper = _bindPhotoDropAndPaste({
+    dropId: "idg-photo-drop",
+    inputId: "idg-photo",
+    previewId: "idg-photo-preview",
+    statusId: "idg-photo-status",
   });
   bind("idg-go", "click", async () => {
     const btn = document.getElementById("idg-go");
@@ -2747,11 +3054,12 @@ function idGenPersonModal(p, onDone) {
       birthdate: document.getElementById("idg-birthdate").value,
       contact_number: document.getElementById("idg-contact").value.trim(),
       emergency_contact: document.getElementById("idg-emergency").value.trim(),
+      affiliated_fca: (document.getElementById("idg-fca").value || "").trim().toUpperCase(),
     };
     btn.disabled = true; btn.textContent = "Generating…";
     try {
       await api(`/api/id-generator/persons/${p.id}`, { method: "PUT", body });
-      const file = fileInput.files[0];
+      const file = photoHelper.getFile();
       if (file) {
         const fd = new FormData();
         fd.append("photo", file);
@@ -2875,13 +3183,14 @@ async function viewAdmin() {
   const tabs = [
     ["barangays", "Barangays"],
     ["users", "Secretaries & Accounts"],
+    ["fcas", "Affiliated FCAs"],
     ["templates", "Templates"],
     ["settings", "Settings"],
   ];
   $app.innerHTML = `
     <div class="page-title">Administration</div>
-    <p class="page-sub">Manage barangays, secretary accounts, certification
-       templates, and office settings.</p>
+    <p class="page-sub">Manage barangays, secretary accounts, Affiliated FCAs,
+       certification templates, and office settings.</p>
     <div class="tabs" id="adm-tabs">
       ${tabs.map(([k, l]) => `<button data-tab="${k}"
         class="${adminTab === k ? "active" : ""}">${l}</button>`).join("")}
@@ -2892,8 +3201,92 @@ async function viewAdmin() {
 
   if (adminTab === "barangays") return adminBarangays();
   if (adminTab === "users") return adminUsers();
+  if (adminTab === "fcas") return adminFcas();
   if (adminTab === "templates") return adminTemplates();
   return adminSettings();
+}
+
+async function adminFcas() {
+  const body = document.getElementById("adm-body");
+  const rows = await api("/api/admin/fcas");
+  try { localStorage.setItem(FCA_CACHE_KEY, JSON.stringify(rows.map((r) => r.name))); } catch (_) {}
+  body.innerHTML = `
+    <div class="card">
+      <div class="section-head"><h3>Add an Affiliated FCA</h3></div>
+      <p class="page-sub">FCA names added here (or typed when generating a
+         Farmer's ID) appear in the Affiliated FCA dropdown/autocomplete and
+         are printed below the QR code on the back of the Farmer's ID.</p>
+      <form id="fca-add" class="filters">
+        <div class="field" style="max-width:440px;flex:1">
+          <label>FCA Name</label>
+          <input name="name" class="caps" required placeholder="e.g. ALCALA FARMERS COOPERATIVE">
+        </div>
+        <button class="btn btn-primary" type="submit">Add FCA</button>
+      </form>
+    </div>
+    <div class="card">
+      <div class="section-head"><h3>Saved Affiliated FCAs (${rows.length})</h3></div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th>FCA Name</th><th>Farmers Affiliated</th><th></th></tr></thead>
+          <tbody>${rows.map((r) => `
+            <tr>
+              <td><b>${esc(r.name)}</b></td>
+              <td>${r.members || 0}</td>
+              <td style="text-align:right;white-space:nowrap">
+                <button class="btn btn-sm" data-fca-edit="${r.id}" data-name="${esc(r.name)}">Edit / Rename</button>
+                <button class="btn btn-sm btn-danger" data-fca-del="${r.id}" data-name="${esc(r.name)}">Delete</button>
+              </td>
+            </tr>`).join("") || ""}</tbody>
+        </table>
+        ${rows.length ? "" : `<div class="empty">No Affiliated FCAs saved yet. Add one above or type one in the ID Generator.</div>`}
+      </div>
+    </div>`;
+  bind("fca-add", "submit", async (e) => {
+    e.preventDefault();
+    const name = new FormData(e.target).get("name");
+    try {
+      await api("/api/admin/fcas", { method: "POST", body: { name } });
+      toast("Affiliated FCA added.");
+      adminFcas();
+    } catch (err) { toast(err.message, "err"); }
+  });
+  document.querySelectorAll("[data-fca-edit]").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.fcaEdit;
+      const oldName = btn.dataset.name;
+      showModal(`
+        <h3>Edit Affiliated FCA</h3>
+        <p class="small muted">Renaming an FCA also updates any farmer ID record currently assigned to <b>${esc(oldName)}</b>.</p>
+        <div class="field">
+          <label>FCA Name *</label>
+          <input id="fca-new-name" class="caps" value="${esc(oldName)}">
+        </div>
+        <div class="modal-actions">
+          <button class="btn" id="fca-cancel" type="button">Cancel</button>
+          <button class="btn btn-primary" id="fca-save" type="button">Save FCA</button>
+        </div>`, 520);
+      bind("fca-cancel", "click", closeModal);
+      bind("fca-save", "click", async () => {
+        const name = (document.getElementById("fca-new-name").value || "").trim().toUpperCase();
+        if (!name) { toast("FCA name is required.", "err"); return; }
+        try {
+          await api(`/api/admin/fcas/${id}`, { method: "PUT", body: { name } });
+          closeModal();
+          toast("Affiliated FCA updated.");
+          adminFcas();
+        } catch (err) { toast(err.message, "err"); }
+      });
+    }));
+  document.querySelectorAll("[data-fca-del]").forEach((btn) =>
+    btn.addEventListener("click", async () => {
+      if (!confirm(`Remove "${btn.dataset.name}" from the saved FCA list?`)) return;
+      try {
+        await api(`/api/admin/fcas/${btn.dataset.fcaDel}`, { method: "DELETE" });
+        toast("Affiliated FCA removed from list.");
+        adminFcas();
+      } catch (err) { toast(err.message, "err"); }
+    }));
 }
 
 async function adminBarangays() {
@@ -2956,14 +3349,14 @@ async function adminUsers() {
   body.innerHTML = `
     <div class="card">
       <div class="section-head"><h3>Create an account</h3></div>
-      <form id="usr-add">
+      <form id="usr-add" class="no-caps">
         <div class="form-grid">
           <div class="field"><label>Full name <span class="req">*</span></label>
-            <input name="full_name" required></div>
+            <input name="full_name" class="no-caps" required></div>
           <div class="field"><label>Username <span class="req">*</span></label>
-            <input name="username" required autocomplete="off"></div>
+            <input name="username" class="no-caps" required autocomplete="off"></div>
           <div class="field"><label>Password <span class="req">*</span></label>
-            <input name="password" type="password" required minlength="6"
+            <input name="password" class="no-caps" type="password" required minlength="6"
                    autocomplete="new-password"></div>
           <div class="field"><label>Role</label>
             <select name="role" id="usr-role">
@@ -3217,13 +3610,13 @@ async function adminSettings() {
         <div class="field">
           <label>Municipality / City</label>
           <input name="municipality" value="${esc(s.municipality)}"
-                 placeholder="e.g. City of Dagupan">
+                 placeholder="e.g. Alcala">
           <div class="help">Fills <code class="ph">{{MUNICIPALITY}}</code></div>
         </div>
         <div class="field">
           <label>Province</label>
           <input name="province" value="${esc(s.province)}"
-                 placeholder="e.g. Pangasinan">
+                 placeholder="e.g. Cagayan">
           <div class="help">Fills <code class="ph">{{PROVINCE}}</code></div>
         </div>
         <div class="field">

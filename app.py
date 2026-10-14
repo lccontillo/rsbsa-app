@@ -14,6 +14,7 @@ import datetime
 import io
 import json
 import os
+import re
 import secrets
 import shutil
 import sqlite3
@@ -159,7 +160,24 @@ def _farmer_name_keys(fields):
     return {f["key"] for f in fields if "NAME" in f["key"].upper()}
 
 
-def _validate_entry_data(tpl, raw, tag="", mode="template"):
+def _is_rsbsa_field_key(key: str) -> bool:
+    ku = (key or "").upper()
+    return "RSBSA" in ku and ("NUM" in ku or ku.endswith("NO") or ku == "RSBSA")
+
+
+def _is_valid_farm_area(val: str) -> bool:
+    """Farm Area (Ha) must be a non-negative numerical value (e.g. 0.2526)."""
+    s = str(val or "").strip()
+    if not re.match(r"^\d+(?:\.\d+)?$", s):
+        return False
+    try:
+        return float(s) >= 0
+    except ValueError:
+        return False
+
+
+def _validate_entry_data(tpl, raw, tag="", mode="template",
+                         default_parcel_location=""):
     """Validate + normalize ONE certificate entry against a template.
 
     Standardizes every text/textarea value to UPPERCASE so that all issued
@@ -174,29 +192,38 @@ def _validate_entry_data(tpl, raw, tag="", mode="template"):
                         certificate is issued.
       * ``template`` -- the template's own required flags (legacy default).
     """
-    raw = raw or {}
+    raw = dict(raw or {})
+    if default_parcel_location and not str(raw.get("PARCEL_LOCATION", "")).strip():
+        raw["PARCEL_LOCATION"] = str(default_parcel_location).strip().upper()
     fields = _farmer_fields(tpl)
     name_keys = _farmer_name_keys(fields)
     cleaned, errors = {}, []
     for f in fields:
         key = f["key"]
+        ku = key.upper()
+        label = "Farm Area (Ha)" if ku == "FARM_AREA" else f["label"]
         val = str(raw.get(key, "")).strip()
         if mode == "strict" and not val:
-            errors.append(f"{tag}{f['label']} is required.")
+            errors.append(f"{tag}{label} is required.")
         elif mode == "guest" and key in name_keys and not val:
-            errors.append(f"{tag}{f['label']} is required.")
+            errors.append(f"{tag}{label} is required.")
         elif mode not in ("guest", "strict") and f.get("required") and not val:
-            errors.append(f"{tag}{f['label']} is required.")
-        if f.get("type") == "number" and val:
+            errors.append(f"{tag}{label} is required.")
+        if ku == "FARM_AREA" and val:
+            if not _is_valid_farm_area(val):
+                errors.append(
+                    f"{tag}Farm Area (Ha) must be a numerical value (e.g. 0.2526)."
+                )
+        elif f.get("type") == "number" and val and not _is_rsbsa_field_key(key):
             try:
                 float(val)
             except ValueError:
-                errors.append(f"{tag}{f['label']} must be a number.")
-        if val and f.get("type") in ("text", "textarea"):
-            val = val.upper()          # standardize to caps
-        if val and key.upper() == "CIVIL_STATUS":
+                errors.append(f"{tag}{label} must be a number.")
+        if val and (f.get("type") in ("text", "textarea") or _is_rsbsa_field_key(key)):
+            val = val.upper()          # standardize to caps (including alphanumeric RSBSA)
+        if val and ku == "CIVIL_STATUS":
             val = _normalize_civil_status(val)
-        elif val and key.upper() in ("GENDER", "SEX", "KASARIAN"):
+        elif val and ku in ("GENDER", "SEX", "KASARIAN"):
             val = db_id.normalize_gender(val)
         if val:
             cleaned[key] = val
@@ -204,16 +231,22 @@ def _validate_entry_data(tpl, raw, tag="", mode="template"):
     # does not define them yet. Staff must also fill these in strict mode.
     field_keys = {f["key"] for f in fields}
     for key, label in (("PARCEL_LOCATION", "Parcel Location"),
-                       ("FARM_AREA", "Farm Area")):
+                       ("FARM_AREA", "Farm Area (Ha)")):
         val = str(raw.get(key, "")).strip()
+        if key == "FARM_AREA" and val and key not in field_keys:
+            if not _is_valid_farm_area(val):
+                errors.append(
+                    f"{tag}Farm Area (Ha) must be a numerical value (e.g. 0.2526)."
+                )
         if val and key not in cleaned:
-            cleaned[key] = val.upper()
+            cleaned[key] = val if key == "FARM_AREA" else val.upper()
         elif mode == "strict" and key not in field_keys and not val:
             errors.append(f"{tag}{label} is required.")
     return cleaned, errors
 
 
-def _validate_entries(tpl, raw_entries, mode="template"):
+def _validate_entries(tpl, raw_entries, mode="template",
+                      default_parcel_location=""):
     """Validate a list of entries that all share one template."""
     if not isinstance(raw_entries, list) or not raw_entries:
         return None, ["No certificate details were provided."]
@@ -224,7 +257,8 @@ def _validate_entries(tpl, raw_entries, mode="template"):
     cleaned_list, errors = [], []
     for idx, raw in enumerate(raw_entries):
         cleaned, errs = _validate_entry_data(
-            tpl, raw, f"Entry {idx + 1}: " if multi else "", mode=mode)
+            tpl, raw, f"Entry {idx + 1}: " if multi else "", mode=mode,
+            default_parcel_location=default_parcel_location)
         cleaned_list.append(cleaned)
         errors += errs
     if errors:
@@ -233,7 +267,8 @@ def _validate_entries(tpl, raw_entries, mode="template"):
 
 
 def _validate_mixed_entries(raw_entries, default_template_id=None,
-                            template_ids=None, mode="template"):
+                            template_ids=None, mode="template",
+                            default_parcel_location=""):
     """Validate entries where EACH entry chooses its own certification type.
 
     Accepts [{"template_id": n, "data": {...}}] and legacy flat dicts (which
@@ -269,7 +304,8 @@ def _validate_mixed_entries(raw_entries, default_template_id=None,
             tpl_ids.append(tid)
             continue
         cleaned, errs = _validate_entry_data(
-            tpl, data_raw, f"Entry {idx + 1}: " if multi else "", mode=mode)
+            tpl, data_raw, f"Entry {idx + 1}: " if multi else "", mode=mode,
+            default_parcel_location=default_parcel_location)
         errors += errs
         wrapped.append({"template_id": tpl["id"], "data": cleaned})
         tpl_ids.append(tpl["id"])
@@ -286,6 +322,60 @@ def _farmer_name_of(fields, data):
         if not f.get("system") and "NAME" in f["key"] and data.get(f["key"]):
             return data[f["key"]]
     return ""
+
+
+def _safe_file_token(value, fallback="NA") -> str:
+    text = re.sub(r'[\\/:*?"<>|\r\n\t]+', "", str(value or "").strip())
+    text = re.sub(r"\s+", "_", text)
+    return text or fallback
+
+
+def _rsbsa_of_entry(data: dict) -> str:
+    if not isinstance(data, dict):
+        return ""
+    for k in ("RSBSA_NUMBER", "RSBSA_NO", "RSBSA"):
+        if data.get(k):
+            return str(data[k]).strip()
+    for k, v in data.items():
+        if "RSBSA" in str(k).upper() and v:
+            return str(v).strip()
+    return ""
+
+
+def _cert_pdf_filename(farmer_name, rsbsa_number, entry_no=1) -> str:
+    """Format: Name_RSBSANumber_EntryNumber.pdf"""
+    name_part = _safe_file_token(farmer_name, "FARMER")
+    rsbsa_part = _safe_file_token(rsbsa_number, "NO-RSBSA")
+    return f"{name_part}_{rsbsa_part}_{int(entry_no or 1)}.pdf"
+
+
+def _cert_download_filename(cert_row) -> str:
+    try:
+        data = json.loads(cert_row["data_json"] or "{}")
+    except Exception:
+        data = {}
+    sibling_ids = [r["id"] for r in g.db.execute(
+        "SELECT id FROM certificates WHERE request_id = ? ORDER BY id",
+        (cert_row["request_id"],)).fetchall()]
+    try:
+        idx = sibling_ids.index(cert_row["id"])
+    except ValueError:
+        idx = 0
+    if not data:
+        req = g.db.execute("SELECT data_json FROM requests WHERE id = ?",
+                           (cert_row["request_id"],)).fetchone()
+        if req:
+            entries = db.entries_of(req["data_json"])
+            if idx < len(entries):
+                data = entries[idx]
+    entry_no = data.get("_ENTRY_NO") or (idx + 1)
+    farmer_name = (cert_row["farmer_name"]
+                   or data.get("FARMER_NAME")
+                   or data.get("FULL_NAME")
+                   or data.get("NAME")
+                   or "FARMER")
+    rsbsa_val = _rsbsa_of_entry(data)
+    return _cert_pdf_filename(farmer_name, rsbsa_val, entry_no)
 
 
 # --------------------------------------------------------------------------- #
@@ -511,10 +601,10 @@ def _seed_sample_template(actor_id=None):
 @app.post("/api/auth/login")
 def login():
     body = request.get_json(silent=True) or {}
-    username = (body.get("username") or "").strip().lower()
+    username = (body.get("username") or "").strip()
     password = body.get("password") or ""
     user = g.db.execute(
-        "SELECT * FROM users WHERE username = ?", (username,)
+        "SELECT * FROM users WHERE LOWER(username) = LOWER(?)", (username,)
     ).fetchone()
     if user is None or not user["active"] or not check_password_hash(
         user["password_hash"], password
@@ -599,7 +689,8 @@ def create_request():
     validation_mode = ("strict" if g.user and g.user["role"] in
                        ("secretary", "admin") else "guest")
     wrapped, tpl_ids, errors = _validate_mixed_entries(
-        raw, body.get("template_id"), mode=validation_mode)
+        raw, body.get("template_id"), mode=validation_mode,
+        default_parcel_location=bgy["name"])
     if errors:
         return _err(" ".join(errors))
     entries = [w["data"] for w in wrapped]
@@ -800,6 +891,11 @@ def request_detail(rid):
     if _scope_barangay_id() is not None and row["barangay_id"] != _scope_barangay_id():
         return _err("This request belongs to another barangay.", 403)
     entries = db.entries_of(row["data_json"])
+    if row["barangay"]:
+        bgy_caps = str(row["barangay"]).strip().upper()
+        for _entry in entries:
+            if isinstance(_entry, dict) and not str(_entry.get("PARCEL_LOCATION", "")).strip():
+                _entry["PARCEL_LOCATION"] = bgy_caps
     new_farmers = [dict(r) for r in g.db.execute(
         "SELECT f.name, f.rsbsa_number FROM request_farmers rf "
         "JOIN farmers f ON f.id = rf.farmer_id "
@@ -852,10 +948,13 @@ def correct_request(rid):
         return _err(f"Request is already {req['status']}.", 409)
     body = request.get_json(silent=True) or {}
     # Rectification keeps each entry's original certification type.
+    bgy_row = g.db.execute("SELECT name FROM barangays WHERE id = ?",
+                           (req["barangay_id"],)).fetchone()
+    bgy_default = bgy_row["name"] if bgy_row else ""
     orig_tpl_ids = db.entry_templates_of(req["data_json"], req["template_id"])
     wrapped, _ctids, errors = _validate_mixed_entries(
         body.get("entries"), req["template_id"], template_ids=orig_tpl_ids,
-        mode="strict")
+        mode="strict", default_parcel_location=bgy_default)
     if errors:
         return _err(" ".join(errors))
     entries = [w["data"] for w in wrapped]
@@ -894,6 +993,9 @@ def approve_request(rid):
     if req["status"] != "pending":
         return _err(f"Request is already {req['status']}.", 409)
 
+    bgy = g.db.execute("SELECT * FROM barangays WHERE id = ?",
+                       (req["barangay_id"],)).fetchone()
+    bgy_default = bgy["name"] if bgy else ""
     _stored_entries = db.entries_of(req["data_json"])
     _stored_tpl_ids = db.entry_templates_of(req["data_json"],
                                             req["template_id"])
@@ -901,17 +1003,16 @@ def approve_request(rid):
         [{"template_id": (_stored_tpl_ids[i] if i < len(_stored_tpl_ids)
                           else req["template_id"]), "data": entry}
          for i, entry in enumerate(_stored_entries)],
-        req["template_id"], mode="strict")
+        req["template_id"], mode="strict",
+        default_parcel_location=bgy_default)
     if _validation_errors:
         return _err("Complete all information before issuing: "
                     + " ".join(_validation_errors))
 
-    bgy = g.db.execute("SELECT * FROM barangays WHERE id = ?",
-                       (req["barangay_id"],)).fetchone()
     settings = {r["key"]: r["value"] for r in
                 g.db.execute("SELECT key, value FROM settings")}
 
-    entries = db.entries_of(req["data_json"])
+    entries = [w["data"] for w in _wrapped]
     entry_tpl_ids = db.entry_templates_of(req["data_json"], req["template_id"])
     today = db.now_iso()[:10]
     year_dir = os.path.join(db.FILINGS_DIR, today[:4])
@@ -951,19 +1052,33 @@ def approve_request(rid):
             if not mapping.get("PARCEL_LOCATION"):
                 mapping["PARCEL_LOCATION"] = "—"
 
+            farmer_name = _farmer_name_of(fields, entry)
+            rsbsa_val = _rsbsa_of_entry(entry)
+            entry_no = _eidx + 1
+            desired_pdf_name = _cert_pdf_filename(farmer_name, rsbsa_val, entry_no)
             # PDF-only filing: the DOCX is only a temporary rendering
             # intermediate in a temp folder and is deleted automatically
             # as soon as the PDF has been produced. It is never saved.
             with tempfile.TemporaryDirectory(prefix="rsbsa_cert_") as tmp_dir:
                 tmp_docx = os.path.join(tmp_dir, f"{cert_no}.docx")
                 docgen.fill_docx(tpl_path, tmp_docx, mapping)
-                pdf_path = docgen.docx_to_pdf(tmp_docx, year_dir)
+                raw_pdf_path = docgen.docx_to_pdf(tmp_docx, year_dir)
+                target_pdf_path = os.path.join(year_dir, desired_pdf_name)
+                if os.path.exists(target_pdf_path) and os.path.abspath(target_pdf_path) != os.path.abspath(raw_pdf_path):
+                    stem = os.path.splitext(desired_pdf_name)[0]
+                    target_pdf_path = os.path.join(year_dir, f"{stem}_{cert_no}.pdf")
+                if os.path.abspath(raw_pdf_path) != os.path.abspath(target_pdf_path):
+                    os.replace(raw_pdf_path, target_pdf_path)
+                pdf_path = target_pdf_path
+            entry_store = dict(entry)
+            entry_store["_ENTRY_NO"] = entry_no
             generated.append({
                 "cert_no": cert_no,
                 "template_id": etpl["id"],
-                "farmer_name": _farmer_name_of(fields, entry),
+                "farmer_name": farmer_name,
                 "pdf_path": pdf_path,
-                "data": dict(entry),
+                "download_name": desired_pdf_name,
+                "data": entry_store,
             })
     except Exception as exc:                 # noqa: BLE001
         for item in generated:               # remove partial PDF output
@@ -1134,10 +1249,20 @@ def _regenerate_certificate_pdf(cert):
         mapping["PARCEL_LOCATION"] = "—"
     year_dir = os.path.join(db.FILINGS_DIR, generated_at[:4])
     os.makedirs(year_dir, exist_ok=True)
+    desired_pdf_name = _cert_pdf_filename(
+        cert["farmer_name"] or _farmer_name_of(fields, entry),
+        _rsbsa_of_entry(entry), idx + 1)
     with tempfile.TemporaryDirectory(prefix="rsbsa_cert_") as tmp_dir:
         tmp_docx = os.path.join(tmp_dir, f"{cert['cert_no']}.docx")
         docgen.fill_docx(tpl_path, tmp_docx, mapping)
-        return docgen.docx_to_pdf(tmp_docx, year_dir)
+        raw_pdf_path = docgen.docx_to_pdf(tmp_docx, year_dir)
+        target_pdf_path = os.path.join(year_dir, desired_pdf_name)
+        if os.path.exists(target_pdf_path) and os.path.abspath(target_pdf_path) != os.path.abspath(raw_pdf_path):
+            stem = os.path.splitext(desired_pdf_name)[0]
+            target_pdf_path = os.path.join(year_dir, f"{stem}_{cert['cert_no']}.pdf")
+        if os.path.abspath(raw_pdf_path) != os.path.abspath(target_pdf_path):
+            os.replace(raw_pdf_path, target_pdf_path)
+        return target_pdf_path
 
 
 @app.post("/api/certificates/<int:cid>/regenerate")
@@ -1210,7 +1335,7 @@ def download_certificate(cid, fmt):
     g.db.commit()
     return send_file(os.path.join(db.BASE_DIR, row["pdf_path"]),
                      as_attachment=True,
-                     download_name=f"{row['cert_no']}.pdf")
+                     download_name=_cert_download_filename(row))
 
 
 # --------------------------------------------------------------------------- #
@@ -1645,6 +1770,15 @@ def update_farmer(fid):
     contact = str(body.get("contact_number") or "").strip()
     emergency = str(body.get("emergency_contact") or "").strip().upper()
     blood = str(body.get("blood_type") or "").strip().upper()
+    fca_raw = body.get("affiliated_fca", f["affiliated_fca"] if "affiliated_fca" in f.keys() else "")
+    affiliated_fca = db_id.normalize_fca(fca_raw)
+    if affiliated_fca:
+        _idc = _id_conn()
+        try:
+            db_id.remember_fca(_idc, affiliated_fca)
+            _idc.commit()
+        finally:
+            _idc.close()
     barangay_id = body.get("barangay_id") or f["barangay_id"]
     try:
         barangay_id = int(barangay_id)
@@ -1681,11 +1815,12 @@ def update_farmer(fid):
             "UPDATE farmers SET rsbsa_key = ?, rsbsa_number = ?, name = ?, "
             "civil_status = ?, address = ?, barangay_id = ?, data_json = ?, "
             "birthdate = ?, contact_number = ?, emergency_contact = ?, "
-            "blood_type = ?, last_seen = ? WHERE id = ?",
+            "blood_type = ?, affiliated_fca = ?, last_seen = ? WHERE id = ?",
             (db.farmer_key(rsbsa, name, barangay_id), rsbsa or None, name,
              civil or None, address or None, barangay_id,
              json.dumps(data), birthdate or None, contact or None,
-             emergency or None, blood or None, db.now_iso(), fid))
+             emergency or None, blood or None, affiliated_fca or None,
+             db.now_iso(), fid))
     except Exception:  # UNIQUE rsbsa_key clash
         g.db.rollback()
         return _err("Another farmer record already uses this RSBSA number "
@@ -1769,11 +1904,13 @@ def _fmt_long_date(iso):
 def _org_line():
     settings = {r["key"]: r["value"] for r in
                 g.db.execute("SELECT key, value FROM settings")}
-    muni = (settings.get("municipality") or "").strip()
-    prov = (settings.get("province") or "").strip()
-    if muni and not muni.lower().startswith(("municipality of", "city of")):
-        muni = "Municipality of " + muni
-    return ", ".join(p for p in (muni, prov) if p) or "Municipality"
+    muni = (settings.get("municipality") or "Alcala").strip()
+    prov = (settings.get("province") or "Cagayan").strip()
+    if "dagupan" in muni.lower():
+        muni = "Alcala"
+    if "pangasinan" in prov.lower():
+        prov = "Cagayan"
+    return ", ".join(p for p in (muni, prov) if p) or "Alcala, Cagayan"
 
 
 def _farmer_for_id(fid):
@@ -1804,6 +1941,7 @@ def _render_id_files(f, row):
         "birthdate": _fmt_long_date(f["birthdate"]),
         "blood_type": f["blood_type"] or "",
         "emergency_contact": f["emergency_contact"] or "",
+        "affiliated_fca": (f["affiliated_fca"] if "affiliated_fca" in f.keys() else "") or "",
     }
     org = _org_line()
     front = idgen.render_front(payload, row["control_no"],
@@ -1830,18 +1968,22 @@ def upload_farmer_photo(fid):
     up = request.files.get("photo")
     if up is None or not up.filename:
         return _err("No photo file received.")
-    ext = os.path.splitext(up.filename)[1].lower()
-    if ext not in (".jpg", ".jpeg", ".png"):
-        return _err("Photo must be a JPG or PNG image.")
-    rel = f"photos/farmer_{fid}{ext}"
+    ext = os.path.splitext(up.filename)[1].lower() or ".png"
+    if ext not in (".jpg", ".jpeg", ".png", ".webp"):
+        return _err("Photo must be a JPG, PNG, or WEBP image.")
+    save_ext = ".png" if ext == ".webp" else ext
+    rel = f"photos/farmer_{fid}{save_ext}"
     dest = os.path.join(db.INSTANCE_DIR, rel)
     up.save(dest)
     try:
         from PIL import Image
         with Image.open(dest) as im:
-            im.verify()
+            rgb = im.convert("RGB")
+        if ext == ".webp":
+            rgb.save(dest, format="PNG")
     except Exception:
-        os.remove(dest)
+        if os.path.exists(dest):
+            os.remove(dest)
         return _err("That file is not a readable image.")
     if f["photo_path"] and f["photo_path"] != rel:
         old_p = os.path.join(db.INSTANCE_DIR, f["photo_path"])
@@ -1966,11 +2108,13 @@ def download_farmer_id(fid, kind):
     path = os.path.join(db.ID_CARDS_DIR, names[kind])
     if not os.path.exists(path):
         return _err("ID card file is missing — generate the ID again.", 404)
-    label = {"front": "FRONT", "back": "BACK",
-             "pdf": "BACK-TO-BACK"}[kind]
+    f = _farmer_for_id(fid)
+    name_part = _safe_file_token(f["name"] if f else "FARMER", "FARMER")
+    rsbsa_part = _safe_file_token(
+        f["rsbsa_number"] if f else row["control_no"], "NO-RSBSA")
+    suffix = {"front": "FRONT.png", "back": "BACK.png", "pdf": "ID.pdf"}[kind]
     return send_file(path, as_attachment=True,
-                     download_name=f"Farmers_ID_{row['control_no']}_{label}"
-                                   + os.path.splitext(names[kind])[1])
+                     download_name=f"{name_part}_{rsbsa_part}_{suffix}")
 
 
 
@@ -2076,13 +2220,15 @@ def _sync_main_fid_seq(conn_id):
 
 
 def _id_person_payload(p, card=None):
+    pkeys = p.keys() if hasattr(p, "keys") else p
     return {
         "id": p["id"], "rsbsa_number": p["rsbsa_number"],
         "name": p["name"], "gender": p["gender"],
-        "civil_status": p["civil_status"], 
+        "civil_status": p["civil_status"],
         "address": p["address"], "birthdate": p["birthdate"],
         "contact_number": p["contact_number"],
         "emergency_contact": p["emergency_contact"],
+        "affiliated_fca": (p["affiliated_fca"] if "affiliated_fca" in pkeys else None),
         "has_photo": bool(p["photo_path"]), "source": p["source"],
         "created_at": p["created_at"], "updated_at": p["updated_at"],
         "id_control_no": card["control_no"] if card else None,
@@ -2099,6 +2245,7 @@ def _render_id_person_files(person, card):
         if os.path.exists(pth):
             from PIL import Image
             photo = Image.open(pth)
+    pkeys = person.keys() if hasattr(person, "keys") else person
     payload = {
         "name": person["name"], "rsbsa_number": person["rsbsa_number"] or "",
         "civil_status": person["civil_status"] or "",
@@ -2107,6 +2254,7 @@ def _render_id_person_files(person, card):
         "birthdate": _fmt_long_date(person["birthdate"]),
         "blood_type": "",
         "emergency_contact": person["emergency_contact"] or "",
+        "affiliated_fca": (person["affiliated_fca"] if "affiliated_fca" in pkeys else "") or "",
     }
     org = _org_line()
     front = idgen.render_front(payload, card["control_no"],
@@ -2129,13 +2277,112 @@ def idgen_template_csv():
     buf = io.StringIO()
     buf.write("RSBSA Number,Farmer Name,Gender,Civil Status,Address,"
               "Birthdate,Contact Number,"
-              "Contact Person in Case of Emergency\r\n")
-    buf.write("123456789,JUAN DELA CRUZ,MALE,MARRIED,"
-              "PUROK 1 Poblacion,1990-01-15,0917 123 4567,"
-              "MARIA DELA CRUZ - 0917 123 4567\r\n")
+              "Contact Person in Case of Emergency,Affiliated FCA\r\n")
+    buf.write("02-015-02-014-EFMN47,JUAN DELA CRUZ,MALE,MARRIED,"
+              "PUROK 1 JURISDICCION ALCALA CAGAYAN,1990-01-15,0917 123 4567,"
+              "MARIA DELA CRUZ - 0917 123 4567,ALCALA FARMERS COOPERATIVE\r\n")
     return send_file(io.BytesIO(buf.getvalue().encode("utf-8-sig")),
                      mimetype="text/csv", as_attachment=True,
                      download_name="id_database_template.csv")
+
+
+@app.get("/api/fcas")
+@login_required
+def list_fcas_api():
+    conn = _id_conn()
+    try:
+        rows = db_id.list_fcas(conn)
+        conn.commit()
+        return jsonify(fcas=rows, names=[r["name"] for r in rows])
+    finally:
+        conn.close()
+
+
+@app.get("/api/admin/fcas")
+@admin_required
+def admin_list_fcas():
+    conn = _id_conn()
+    try:
+        rows = db_id.list_fcas(conn)
+        conn.commit()
+        return jsonify(rows)
+    finally:
+        conn.close()
+
+
+@app.post("/api/admin/fcas")
+@admin_required
+def admin_add_fca():
+    body = request.get_json(silent=True) or {}
+    name = db_id.normalize_fca(body.get("name"))
+    if not name:
+        return _err("FCA name is required.")
+    conn = _id_conn()
+    try:
+        if conn.execute("SELECT 1 FROM fca_list WHERE name = ?", (name,)).fetchone():
+            return _err(f"FCA '{name}' is already in the list.", 409)
+        cur = conn.execute(
+            "INSERT INTO fca_list (name, created_at) VALUES (?, ?)",
+            (name, db.now_iso()))
+        conn.commit()
+        fid = cur.lastrowid
+    finally:
+        conn.close()
+    _audit("fca.create", f"Affiliated FCA '{name}' added")
+    g.db.commit()
+    return jsonify(ok=True, id=fid, name=name), 201
+
+
+@app.put("/api/admin/fcas/<int:fid>")
+@admin_required
+def admin_update_fca(fid):
+    body = request.get_json(silent=True) or {}
+    new_name = db_id.normalize_fca(body.get("name"))
+    if not new_name:
+        return _err("FCA name is required.")
+    conn = _id_conn()
+    try:
+        row = conn.execute("SELECT * FROM fca_list WHERE id = ?", (fid,)).fetchone()
+        if row is None:
+            return _err("FCA not found.", 404)
+        old_name = row["name"]
+        clash = conn.execute(
+            "SELECT id FROM fca_list WHERE name = ? AND id <> ?",
+            (new_name, fid)).fetchone()
+        if clash:
+            return _err(f"Another FCA entry is already named '{new_name}'.", 409)
+        conn.execute("UPDATE fca_list SET name = ? WHERE id = ?", (new_name, fid))
+        conn.execute(
+            "UPDATE id_persons SET affiliated_fca = ?, updated_at = ? "
+            "WHERE affiliated_fca = ?",
+            (new_name, db.now_iso(), old_name))
+        conn.commit()
+    finally:
+        conn.close()
+    g.db.execute(
+        "UPDATE farmers SET affiliated_fca = ? WHERE affiliated_fca = ?",
+        (new_name, old_name))
+    _audit("fca.update", f"Affiliated FCA renamed: '{old_name}' → '{new_name}'")
+    g.db.commit()
+    return jsonify(ok=True, id=fid, name=new_name)
+
+
+@app.delete("/api/admin/fcas/<int:fid>")
+@admin_required
+def admin_delete_fca(fid):
+    conn = _id_conn()
+    try:
+        row = conn.execute("SELECT * FROM fca_list WHERE id = ?", (fid,)).fetchone()
+        if row is None:
+            return _err("FCA not found.", 404)
+        name = row["name"]
+        conn.execute("DELETE FROM fca_list WHERE id = ?", (fid,))
+        conn.commit()
+    finally:
+        conn.close()
+    _audit("fca.delete", f"Affiliated FCA '{name}' removed from saved list")
+    g.db.commit()
+    return jsonify(ok=True)
 
 
 @app.get("/api/id-generator/persons")
@@ -2160,7 +2407,8 @@ def idgen_persons():
             item = _id_person_payload(p, card)
             if q and q not in (item["name"] or "").lower() \
                     and q not in (item["rsbsa_number"] or "").lower() \
-                    and q not in (item["gender"] or "").lower():
+                    and q not in (item["gender"] or "").lower() \
+                    and q not in (item.get("affiliated_fca") or "").lower():
                 continue
             out.append(item)
         total = conn.execute("SELECT COUNT(*) AS n FROM id_persons").fetchone()["n"]
@@ -2203,16 +2451,21 @@ def idgen_person_update(pid):
             except ValueError:
                 return _err("Birthdate must be a valid date.")
         gender = db_id.normalize_gender(body.get("gender"))
+        fca = db_id.remember_fca(
+            conn, body.get("affiliated_fca")
+            if "affiliated_fca" in body else p["affiliated_fca"])
         conn.execute(
             "UPDATE id_persons SET gender = ?, civil_status = ?, "
             "address = ?, birthdate = ?, contact_number = ?, "
-            "emergency_contact = ?, updated_at = ? WHERE id = ?",
+            "emergency_contact = ?, affiliated_fca = ?, updated_at = ? "
+            "WHERE id = ?",
             (gender or None,
              db_id.normalize_civil_status(body.get("civil_status")),
              (body.get("address") or "").strip().upper(),
              birthdate or None,
              (body.get("contact_number") or "").strip(),
              (body.get("emergency_contact") or "").strip().upper(),
+             fca or None,
              db.now_iso(), pid))
         conn.commit()
         p = conn.execute("SELECT * FROM id_persons WHERE id = ?",
@@ -2240,18 +2493,22 @@ def idgen_person_photo_upload(pid):
         up = request.files.get("photo")
         if up is None or not up.filename:
             return _err("No photo file received.")
-        ext = os.path.splitext(up.filename)[1].lower()
-        if ext not in (".jpg", ".jpeg", ".png"):
-            return _err("Photo must be a JPG or PNG image.")
-        rel = f"photos/id_person_{pid}{ext}"
+        ext = os.path.splitext(up.filename)[1].lower() or ".png"
+        if ext not in (".jpg", ".jpeg", ".png", ".webp"):
+            return _err("Photo must be a JPG, PNG, or WEBP image.")
+        save_ext = ".png" if ext == ".webp" else ext
+        rel = f"photos/id_person_{pid}{save_ext}"
         dest = os.path.join(db.INSTANCE_DIR, rel)
         up.save(dest)
         try:
             from PIL import Image
             with Image.open(dest) as im:
-                im.verify()
+                rgb = im.convert("RGB")
+            if ext == ".webp":
+                rgb.save(dest, format="PNG")
         except Exception:
-            os.remove(dest)
+            if os.path.exists(dest):
+                os.remove(dest)
             return _err("That file is not a readable image.")
         if p["photo_path"] and p["photo_path"] != rel \
                 and p["photo_path"].startswith("photos/id_person_"):
@@ -2326,6 +2583,9 @@ def idgen_import_csv():
                               "contactpersonincaseofemergency",
                               "contactpersoninemergency",
                               "incaseofemergency"},
+        "affiliated_fca": {"affiliatedfca", "fca", "fcaname",
+                           "farmerscooperative", "association",
+                           "farmerassociation"},
     }
     required = ("rsbsa_number", "name")
     colmap = {}
@@ -2387,15 +2647,17 @@ def idgen_import_csv():
                 birthdate = parsed_date.isoformat()
             contact_number = _csv_value(row, "contact_number")
             emergency_contact = _csv_value(row, "emergency_contact").upper()
+            affiliated_fca = db_id.remember_fca(
+                conn, _csv_value(row, "affiliated_fca"))
             now = db.now_iso()
             conn.execute(
                 "INSERT INTO id_persons (rsbsa_key, rsbsa_number, name, "
                 "gender, civil_status, address, birthdate, contact_number, "
-                "emergency_contact, source, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'csv', ?, ?)",
+                "emergency_contact, affiliated_fca, source, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'csv', ?, ?)",
                 (key, rsbsa, name, gender or None, civil_status,
                  address, birthdate, contact_number, emergency_contact,
-                 now, now))
+                 affiliated_fca or None, now, now))
             seen_file.add(key)
             added.append({"row": i, "rsbsa": rsbsa, "name": name})
         conn.commit()
@@ -2468,17 +2730,19 @@ def idgen_copy_masterlist():
                                 "rsbsa": rsbsa, "reason": "Already in ID database"})
                 continue
             now = db.now_iso()
+            fca_val = db_id.remember_fca(
+                conn, f["affiliated_fca"] if "affiliated_fca" in f.keys() else "")
             cur = conn.execute(
                 "INSERT INTO id_persons (rsbsa_key, rsbsa_number, name, "
                 "gender, civil_status, address, birthdate, contact_number, "
-                "emergency_contact, photo_path, source, source_farmer_id, "
-                "created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'masterlist', ?, ?, ?)",
+                "emergency_contact, affiliated_fca, photo_path, source, "
+                "source_farmer_id, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'masterlist', ?, ?, ?)",
                 (db_id.rsbsa_key(rsbsa), rsbsa, f["name"], None,
                  db_id.normalize_civil_status(f["civil_status"]),
                  f["address"], f["birthdate"],
-                 f["contact_number"], f["emergency_contact"], None,
-                 fid, now, now))
+                 f["contact_number"], f["emergency_contact"],
+                 fca_val or None, None, fid, now, now))
             pid = cur.lastrowid
             if f["photo_path"]:
                 src = os.path.join(db.INSTANCE_DIR, f["photo_path"])
@@ -2578,6 +2842,8 @@ def idgen_issue_card(pid):
 def idgen_download_card(pid, kind):
     conn = _id_conn()
     try:
+        p = conn.execute("SELECT * FROM id_persons WHERE id = ?",
+                         (pid,)).fetchone()
         card = conn.execute("SELECT * FROM id_cards WHERE person_id = ?",
                             (pid,)).fetchone()
         if card is None:
@@ -2590,10 +2856,12 @@ def idgen_download_card(pid, kind):
         path = os.path.join(db.ID_CARDS_DIR, names[kind])
         if not os.path.exists(path):
             return _err("ID card file is missing — generate the ID again.", 404)
-        label = {"front": "FRONT", "back": "BACK", "pdf": "BACK-TO-BACK"}[kind]
+        name_part = _safe_file_token(p["name"] if p else "FARMER", "FARMER")
+        rsbsa_part = _safe_file_token(
+            p["rsbsa_number"] if p else card["control_no"], "NO-RSBSA")
+        suffix = {"front": "FRONT.png", "back": "BACK.png", "pdf": "ID.pdf"}[kind]
         return send_file(path, as_attachment=True,
-                         download_name=f"Farmers_ID_{card['control_no']}_{label}"
-                                       + os.path.splitext(names[kind])[1])
+                         download_name=f"{name_part}_{rsbsa_part}_{suffix}")
     finally:
         conn.close()
 
@@ -2854,7 +3122,7 @@ def admin_users():
 @admin_required
 def admin_create_user():
     body = request.get_json(silent=True) or {}
-    username = (body.get("username") or "").strip().lower()
+    username = (body.get("username") or "").strip()
     password = body.get("password") or ""
     full_name = (body.get("full_name") or "").strip()
     role = body.get("role") or "secretary"
@@ -2865,6 +3133,9 @@ def admin_create_user():
         return _err("Password must be at least 6 characters.")
     if role == "secretary" and not barangay_id:
         return _err("A secretary must be assigned to a barangay.")
+    if g.db.execute("SELECT 1 FROM users WHERE LOWER(username) = LOWER(?)",
+                    (username,)).fetchone():
+        return _err("That username is already taken.", 409)
     try:
         cur = g.db.execute(
             "INSERT INTO users (username, password_hash, full_name, role, "
@@ -3334,12 +3605,20 @@ def _ensure_parcel_fields():
             changed = False
             if "FARM_AREA" not in keys:
                 fields.append({
-                    "key": "FARM_AREA", "label": "Farm Area", "type": "text",
-                    "required": True, "system": False,
-                    "help": "Area of this parcel (e.g. 1.5 HECTARES). "
+                    "key": "FARM_AREA", "label": "Farm Area (Ha)",
+                    "type": "number", "required": True, "system": False,
+                    "help": "Numerical value only in hectares (e.g. 0.2526). "
                             "One entry per parcel."})
                 keys.append("FARM_AREA")
                 changed = True
+            for f in fields:
+                if f.get("key") == "FARM_AREA":
+                    if f.get("label") != "Farm Area (Ha)" or f.get("type") != "number":
+                        f["label"] = "Farm Area (Ha)"
+                        f["type"] = "number"
+                        f["help"] = ("Numerical value only in hectares (e.g. 0.2526). "
+                                     "One entry per parcel.")
+                        changed = True
             if "PARCEL_LOCATION" not in keys:
                 idx = keys.index("FARM_AREA")
                 fields.insert(idx + 1, {

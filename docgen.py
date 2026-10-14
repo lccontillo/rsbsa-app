@@ -27,6 +27,8 @@ _ACRONYMS = {"RSBSA", "TIN", "ID", "NBI", "PTR", "PSA", "BARANGAY"}
 
 
 def _label_for(key: str) -> str:
+    if key == "FARM_AREA":
+        return "Farm Area (Ha)"
     words = []
     for w in key.split("_"):
         words.append(w.upper() if w.upper() in _ACRONYMS else w.capitalize())
@@ -79,10 +81,11 @@ def build_fields_config(docx_path: str) -> list:
         fields.append({
             "key": key,
             "label": _label_for(key),
-            "type": "text",
+            "type": "number" if key == "FARM_AREA" else "text",
             "required": True,
             "system": key in SYSTEM_PLACEHOLDER_KEYS,
-            "help": "",
+            "help": ("Numerical value only in hectares (e.g. 0.2526). "
+                     "One entry per parcel." if key == "FARM_AREA" else ""),
         })
     return fields
 

@@ -317,7 +317,7 @@ def render_back(farmer: dict, control_no: str, issued_at: str,
 
     # QR card (white squircle) — QR encodes the RSBSA Number; modules are
     # resampled with NEAREST so they stay perfectly crisp at 600 dpi
-    qx, qy, qs = S(628), S(138), S(344)
+    qx, qy, qs = S(628), S(116), S(336)
     d.rounded_rectangle([qx + S(6), qy + S(10), qx + qs + S(6),
                          qy + qs + S(10)],
                         radius=S(26), fill=(232, 234, 226))
@@ -328,9 +328,41 @@ def render_back(farmer: dict, control_no: str, issued_at: str,
     qr.add_data(farmer.get("rsbsa_number") or "")
     qr.make(fit=True)
     qr_img = qr.make_image(fill_color="black", back_color="white") \
-        .convert("RGB").resize((S(296), S(296)), Image.Resampling.NEAREST)
-    img.paste(qr_img, (qx + S(24), qy + S(24)))
+        .convert("RGB").resize((S(292), S(292)), Image.Resampling.NEAREST)
+    img.paste(qr_img, (qx + S(22), qy + S(22)))
     d = ImageDraw.Draw(img)
+
+    # Farmer's Affiliated FCA panel directly below the QR code
+    fx0, fy0, fx1, fy1 = qx, S(476), qx + qs, S(604)
+    d.rounded_rectangle([fx0, fy0, fx1, fy1], radius=S(18),
+                        fill=DESIGN["chip"], outline=DESIGN["grad_a"],
+                        width=S(2))
+    _tracked(d, fx0 + S(18), fy0 + S(14), "AFFILIATED FCA",
+             F(13, weight="bold"), DESIGN["green"], tracking=2)
+    fca_val = str(farmer.get("affiliated_fca") or "").strip().upper() or "—"
+    fca_max_w = (fx1 - fx0) - S(36)
+    fca_lines = [fca_val]
+    fca_font = F(22, weight="bold")
+    for pt in range(22, 13, -1):
+        cand = F(pt, weight="bold")
+        wrapped = _wrap(d, fca_val, cand, fca_max_w)
+        if len(wrapped) == 1 and d.textlength(wrapped[0], font=cand) <= fca_max_w:
+            fca_font = cand
+            fca_lines = wrapped
+            break
+        if len(wrapped) <= 2 and pt <= 19:
+            fca_font = cand
+            fca_lines = wrapped[:2]
+            break
+    else:
+        fca_font = F(14, weight="bold")
+        fca_lines = _wrap(d, fca_val, fca_font, fca_max_w)[:2]
+    line_step = int(fca_font.size * 1.15)
+    total_text_h = len(fca_lines) * line_step
+    text_top = fy0 + S(38) + max(0, ((fy1 - fy0 - S(52)) - total_text_h) // 2)
+    for idx_line, line in enumerate(fca_lines):
+        d.text((fx0 + S(18), text_top + idx_line * line_step), line,
+               font=fca_font, fill=DESIGN["ink"])
 
     # signature + issued line: the issued line sits high so there is a
     # clear blank area to sign in above the signature line

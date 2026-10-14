@@ -54,19 +54,38 @@ issued certificate is filed (Word + PDF) with a complete audit trail.
   registered to a *different* name is refused (duplicate protection), and
   every encoding is audit-logged as `farmer.create`. This replaces seeding
   or re-uploading a CSV file whenever a farmer is missing.
-- **Required fields by role** — farmer/guest submissions require only the
-  **Barangay** and **Farmer's Name**; all other request and Farmer Data
-  Entry inputs are optional for guests. Secretary accounts must fill in
-  **all** inputs: the server rejects incomplete secretary Farmer Data
-  Entry, incomplete saved corrections, and any **Approve & Issue** while
-  a field is still blank.
+- **Required fields by role + Secretary missing-field highlighting** —
+  farmer/guest submissions require only the **Barangay** and **Farmer's Name**;
+  all other request and Farmer Data Entry inputs are optional for guests.
+  Secretary accounts must fill in **all** inputs: any field without data input
+  yet is visually highlighted with an amber **NEEDS INPUT** indicator and live
+  counter banner, and the server rejects incomplete secretary Farmer Data
+  Entry, incomplete saved corrections, and any **Approve & Issue** while a
+  field is still blank.
+- **Parcel Location auto-population + numerical Farm Area (Ha)** —
+  **Parcel Location** is automatically pre-filled with the Barangay (in ALL
+  CAPS) while remaining editable. **Farm Area (Ha)** accepts numerical values
+  only in hectares (e.g. `0.2526`). **RSBSA Number** supports alphanumeric
+  characters and special symbols (especially `-`, e.g. `02-015-02-014-EFMN47`).
+- **Standardized PDF download filenames** — issued Certification PDFs are
+  named `Name_RSBSANumber_EntryNumber.pdf` (e.g.
+  `JUAN_DELA_CRUZ_02-015-02-014-EFMN47_1.pdf`), and Farmer's ID downloads are
+  named `Name_RSBSANumber_ID.pdf` (`_FRONT.png` / `_BACK.png`).
+- **Farmer's Affiliated FCA + Drag/Drop & Clipboard Paste ID Photos** — the
+  back of the Farmer's ID includes an **AFFILIATED FCA** panel directly below
+  the QR code. Newly typed FCA names are automatically remembered for future
+  IDs and can also be added, renamed, or deleted under **Administration →
+  Affiliated FCAs**. ID photos can be uploaded by file browser, **drag & drop**,
+  or **copy & paste (`Ctrl+V`)** from the clipboard.
 - **Secretary rectification** — on the review screen every field is editable.
   Secretaries can correct farmer-typed values before admitting the request;
   each correction is saved and written to the audit trail with the exact
   `old → new` change (`Inputs rectified by secretary`).
-- **CAPS standardization + choice dropdowns** — data-entry inputs display
-  and store text in ALL CAPS as the standard format. **Gender** uses a
-  `MALE` / `FEMALE` dropdown and **Civil Status** uses a dropdown
+- **CAPS standardization + choice dropdowns** — farmer data-entry inputs
+  display and store text in ALL CAPS as the standard format, while **Login**
+  and **Secretary / User Account Creation** allow both lower- and upper-case
+  letters without locking to capslock. **Gender** uses a `MALE` / `FEMALE`
+  dropdown and **Civil Status** uses a dropdown
   (`SINGLE`, `MARRIED`, `WIDOWED`, `SEPARATED`, `DIVORCED`, `ANNULLED`)
   in the request form, Farmer Data Entry, secretary review, Farmer
   Masterlist edit, and ID Generator; common aliases (e.g. `F`, `WIDOWER`)
