@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RSBSA Certification Manager</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <meta name="theme-color" content="#0f4c81">
+  <link rel="apple-touch-icon" href="/static/office-logo.png">
+  <link rel="icon" type="image/png" href="/static/office-logo.png">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#/">
+        <img class="logo-img" src="/static/office-logo.png" width="32" height="32" style="width:32px;height:32px;object-fit:contain;border-radius:50%;background:#fff;padding:2px;box-shadow:0 1px 4px rgba(0,0,0,.25);flex:0 0 auto" alt="Office of the Municipal Agriculturist — Alcala, Cagayan official logo">
+        <span>RSBSA Cert Manager</span>
+      </a>
+      <nav class="nav-links" id="nav-links"></nav>
+      <button class="net-pill" id="net-pill" title="Connection and offline sync status">&#x1F7E2; Online</button>
+      <div class="nav-user" id="nav-user"></div>
+    </div>
+  </header>
+
+  <main class="container" id="app">
+    <div class="loading">Loading…</div>
+  </main>
+
+  <div id="modal-root"></div>
+  <div id="toast-wrap"></div>
+
+  <script src="/static/jsQR.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
