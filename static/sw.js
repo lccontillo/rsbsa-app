@@ -6,7 +6,7 @@
  * - Non-GET requests are never handled here: the app itself queues them in
  *   its offline outbox (see app.js) and syncs when the connection returns.
  */
-const SHELL_CACHE = "rsbsa-shell-v6";
+const SHELL_CACHE = "rsbsa-shell-v7";
 const API_CACHE = "rsbsa-api-v1";
 const SHELL = [
   "/",
