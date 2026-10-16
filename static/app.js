@@ -692,7 +692,8 @@ async function openMessengerModal() {
       if (activeTab === "active" && isAdmin) {
         bodyEl.innerHTML = `<div class="loading">Fetching active secretaries...</div>`;
         try {
-          const secs = await api("/api/admin/active-secretaries");
+          const sRes = await api("/api/admin/active-secretaries");
+          const secs = Array.isArray(sRes) ? sRes : (sRes && sRes.secretaries ? sRes.secretaries : []);
           bodyEl.innerHTML = `
             <p class="page-sub" style="margin-top:0">Secretaries active within the last 5 minutes are marked Online.</p>
             <div class="table-wrap">
@@ -726,7 +727,8 @@ async function openMessengerModal() {
           let url = "/api/messages";
           let secs = [];
           if (isAdmin) {
-            secs = await api("/api/admin/active-secretaries");
+            const sRes = await api("/api/admin/active-secretaries");
+            secs = Array.isArray(sRes) ? sRes : (sRes && sRes.secretaries ? sRes.secretaries : []);
             if (!activeSecId && secs.length) activeSecId = secs[0].id;
             url += `?partner_id=${activeSecId || ""}`;
           }
@@ -815,10 +817,13 @@ async function openMessengerModal() {
             ` : ""}
             <div id="bc-stream" style="flex:1;overflow-y:auto;border:1px solid #ddd;border-radius:6px;padding:12px;background:#f9f9f9;min-height:220px;max-height:300px">
               ${msgs.filter((m) => m.is_broadcast).map((m) => `
-                <div style="background:#fff;border-left:4px solid #0f4c81;border-radius:4px;padding:10px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
-                  <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+                <div style="background:#fff;border-left:4px solid #0f4c81;border-radius:4px;padding:10px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.06);position:relative">
+                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
                     <b>📢 ${esc(m.sender_name)} (${esc((m.sender_role || "ADMIN").toUpperCase())})</b>
-                    <span class="small muted">${fmtDT(m.sent_at || m.created_at)}</span>
+                    <div style="display:flex;align-items:center;gap:8px">
+                      <span class="small muted">${fmtDT(m.sent_at || m.created_at)}</span>
+                      ${isAdmin ? `<button class="btn btn-sm btn-danger" data-bc-del="${m.id}" style="padding:1px 6px;font-size:11px" title="Delete announcement">🗑 Delete</button>` : ""}
+                    </div>
                   </div>
                   <div style="font-size:13px;color:#2d3748">${esc(m.message || m.content || "")}</div>
                 </div>
@@ -826,6 +831,19 @@ async function openMessengerModal() {
             </div>
           `;
           if (isAdmin) {
+            bodyEl.querySelectorAll("[data-bc-del]").forEach((btn) => {
+              btn.addEventListener("click", () => {
+                const mid = Number(btn.dataset.bcDel);
+                confirmModal("Delete Announcement", "Are you sure you want to delete this announcement? It will be removed for all users.", "Delete", async () => {
+                  try {
+                    await api(`/api/messages/${mid}`, { method: "DELETE" });
+                    toast("Announcement deleted.");
+                    loadTab();
+                  } catch (err) { toast(err.message, "err"); }
+                }, true);
+              });
+            });
+
             bind("bc-send-form", "submit", async (e) => {
               e.preventDefault();
               const inp = document.getElementById("bc-input");
@@ -1458,6 +1476,10 @@ function farmerEntryModal({ rsbsa = "", barangayId = null, barangayName = "",
         <input type="text" id="fe-name" class="caps" placeholder="e.g. JUAN DELA CRUZ"></div>
       <div class="field"><label>Civil Status (Katayuang Sibil)${star}</label>
         <select id="fe-civil" class="caps">${_choiceOptionsFor("civil", "")}</select></div>
+      <div class="field"><label>Gender (Kasarian)</label>
+        <select id="fe-gender" class="caps">${_choiceOptionsFor("gender", "")}</select></div>
+      <div class="field"><label>Birthdate (Araw ng Kapanganakan)</label>
+        <input type="date" id="fe-birthdate"></div>
       <div class="field full"><label>Address (Tirahan)${star}</label>
         <input type="text" id="fe-address" class="caps" placeholder="Purok / Sitio, Barangay"></div>
     </div>
@@ -1474,6 +1496,8 @@ function farmerEntryModal({ rsbsa = "", barangayId = null, barangayName = "",
     const fullname = (document.getElementById("fe-name").value || "").trim().toUpperCase();
     const civil = (document.getElementById("fe-civil").value || "").trim().toUpperCase();
     const address = (document.getElementById("fe-address").value || "").trim().toUpperCase();
+    const gender = (document.getElementById("fe-gender")?.value || "").trim().toUpperCase();
+    const birthdate = (document.getElementById("fe-birthdate")?.value || "").trim();
     if (!fullname) { toast("Farmer name is required.", "err"); return; }
     if (secretaryStrict && (!num || !civil || !address)) {
       toast("Secretary entries must be complete — fill in RSBSA Number, Civil Status, and Address.", "err");
@@ -1493,6 +1517,8 @@ function farmerEntryModal({ rsbsa = "", barangayId = null, barangayName = "",
           FARMER_NAME: fullname,
           CIVIL_STATUS: civil,
           ADDRESS: address,
+          GENDER: gender,
+          BIRTHDATE: birthdate,
         },
       }}, `Farmer data entry \u2014 ${fullname}`);
       closeModal();
@@ -2842,6 +2868,10 @@ async function farmerEditModal(f, onSaved) {
         </select>
         ${f.pending_remarks ? `<div class="help" style="color:#d97706;font-weight:600">Pending approval to: ${esc(f.pending_remarks)}</div>` : ""}
       </div>
+      <div class="field"><label>Gender</label>
+        <select id="ed-gender" class="caps" ${isAdmin ? "" : "disabled"}>${_choiceOptionsFor("gender", f.gender || "")}</select></div>
+      <div class="field"><label>Birthdate</label>
+        <input type="date" id="ed-birthdate" value="${esc(f.birthdate ? f.birthdate.slice(0, 10) : "")}" ${isAdmin ? "" : "readonly style='background:#f3f4f6'"}></div>
       <div class="field"><label>Civil Status</label>
         <select id="ed-civil" class="caps" ${isAdmin ? "" : "disabled"}>${_choiceOptionsFor("civil", f.civil_status || "")}</select></div>
       <div class="field"><label>Barangay *</label>
@@ -2871,6 +2901,8 @@ async function farmerEditModal(f, onSaved) {
       name: document.getElementById("ed-name").value.trim(),
       rsbsa_number: document.getElementById("ed-rsbsa").value.trim(),
       remarks: remarks,
+      gender: document.getElementById("ed-gender")?.value || "",
+      birthdate: document.getElementById("ed-birthdate")?.value || "",
       civil_status: document.getElementById("ed-civil").value.trim(),
       address: document.getElementById("ed-address").value.trim(),
       barangay_id: Number(document.getElementById("ed-barangay").value),
@@ -2929,8 +2961,10 @@ async function farmerIdModal(f, onDone) {
     </div>
     <form id="fid-form">
       <div class="form-grid">
+        <div class="field"><label>Gender</label>
+          <select id="fid-gender" class="caps">${_choiceOptionsFor("gender", f.gender || "")}</select></div>
         <div class="field"><label>Birthdate</label>
-          <input type="date" id="fid-birthdate" value="${esc(f.birthdate || "")}"></div>
+          <input type="date" id="fid-birthdate" value="${esc(f.birthdate ? f.birthdate.slice(0, 10) : "")}"></div>
         <div class="field"><label>Contact Number</label>
           <input id="fid-contact" class="caps" value="${esc(f.contact_number || "")}" placeholder="09XX XXX XXXX"></div>
         <div class="field"><label>Contact Person in Case of Emergency (Name — Number)</label>
@@ -2978,6 +3012,7 @@ async function farmerIdModal(f, onDone) {
   bind("fid-go", "click", async () => {
     const btn = document.getElementById("fid-go");
     const extras = {
+      gender: document.getElementById("fid-gender") ? document.getElementById("fid-gender").value : "",
       birthdate: document.getElementById("fid-birthdate").value,
       contact_number: document.getElementById("fid-contact").value.trim(),
       emergency_contact: document.getElementById("fid-emergency").value.trim(),
@@ -3059,9 +3094,15 @@ async function viewFarmers() {
               ${bgys.map((b) => `<option value="${b.id}">${esc(b.name)}</option>`).join("")}
             </select></div>` : ""}
         <div class="field"><label>Remarks</label>
-          <select name="remarks">
+          <select name="remarks" id="farmers-filter-remarks">
             <option value="">All Remarks</option>
             ${FARMER_REMARKS_OPTIONS.map((r) => `<option value="${r}">${r}</option>`).join("")}
+          </select></div>
+        <div class="field"><label>Farmer's ID Status</label>
+          <select name="id_status" id="farmers-filter-id-status">
+            <option value="">All ID Statuses</option>
+            <option value="not_yet_generated">Not yet generated</option>
+            <option value="generated">Generated</option>
           </select></div>
         <button class="btn btn-primary" type="submit">Search</button>
       </form>
@@ -3073,11 +3114,13 @@ async function viewFarmers() {
     const q = (fd.get("q") || "").toString().trim();
     const bgyId = (fd.get("barangay_id") || "").toString().trim();
     const remarks = (fd.get("remarks") || "").toString().trim();
+    const idStatus = (fd.get("id_status") || "").toString().trim();
 
     const qs = new URLSearchParams();
     if (q) qs.set("q", q);
     if (bgyId) qs.set("barangay_id", bgyId);
     if (remarks) qs.set("remarks", remarks);
+    if (idStatus) qs.set("id_status", idStatus);
     if (farmerTab !== "all") qs.set("status", farmerTab);
 
     const expBtn = document.getElementById("farmer-export-csv");
@@ -3214,6 +3257,8 @@ async function viewFarmers() {
     } catch (err) { toast(err.message, "err"); }
   }
   bind("farmers-filters", "submit", (e) => { e.preventDefault(); load(); });
+  document.getElementById("farmers-filter-remarks")?.addEventListener("change", () => load());
+  document.getElementById("farmers-filter-id-status")?.addEventListener("change", () => load());
   document.querySelectorAll("[data-ftab]").forEach((btn) =>
     btn.addEventListener("click", () => {
       farmerTab = btn.dataset.ftab;
@@ -3350,6 +3395,12 @@ async function viewIdGenerator() {
             <option value="">All Remarks</option>
             ${FARMER_REMARKS_OPTIONS.map((r) => `<option value="${r}">${r}</option>`).join("")}
           </select></div>
+        <div class="field"><label>Farmer's ID Status</label>
+          <select name="id_status" id="idg-search-id-status">
+            <option value="">All ID Statuses</option>
+            <option value="not_yet_generated">Not yet generated</option>
+            <option value="generated">Generated</option>
+          </select></div>
         <div class="field"><label>Printed Status</label>
           <select name="printed" id="idg-search-print">
             <option value="">All Statuses</option>
@@ -3387,7 +3438,7 @@ async function viewIdGenerator() {
     idgPage = page;
     const fd = new FormData(document.getElementById("idg-filters"));
     const qs = new URLSearchParams();
-    ["q", "barangay", "remarks", "printed"].forEach((k) => {
+    ["q", "barangay", "remarks", "id_status", "printed"].forEach((k) => {
       const v = (fd.get(k) || "").toString().trim();
       if (v) qs.set(k, v);
     });
@@ -3570,6 +3621,7 @@ async function viewIdGenerator() {
   document.getElementById("idg-search-q").addEventListener("input", debouncedSearch);
   document.getElementById("idg-search-bgy").addEventListener("input", debouncedSearch);
   document.getElementById("idg-search-rem").addEventListener("change", () => loadPersons(1));
+  document.getElementById("idg-search-id-status")?.addEventListener("change", () => loadPersons(1));
   document.getElementById("idg-search-print").addEventListener("change", () => loadPersons(1));
   document.getElementById("idg-search-limit").addEventListener("change", () => loadPersons(1));
 

@@ -243,11 +243,27 @@ def render_front(farmer: dict, control_no: str, valid_until: str,
     # details (fixed rows — airy, no dividers)
     x = S(392)
     _tracked(d, x, S(224), "NAME", F(14, weight="semi"), DESIGN["muted"])
-    name_lines = _wrap(d, farmer.get("name"), F(37, weight="bold"), S(580))[:2]
+    raw_name = str(farmer.get("name") or "").strip()
+    # Choose appropriate font size based on length so it fits neatly above the RSBSA box (max y ~ S(330))
+    name_font_size = 36
+    if len(raw_name) > 36:
+        name_font_size = 28
+    elif len(raw_name) > 26:
+        name_font_size = 32
+
+    name_font = F(name_font_size, weight="bold")
+    name_lines = _wrap(d, raw_name, name_font, S(580))[:2]
+    # If even after wrapping it requires two lines at 36, scale down if needed
+    if len(name_lines) > 1 and name_font_size > 30:
+        name_font_size = 30
+        name_font = F(name_font_size, weight="bold")
+        name_lines = _wrap(d, raw_name, name_font, S(580))[:2]
+
+    line_spacing = S(36) if name_font_size <= 30 else S(40)
     yy = S(246)
     for line in name_lines:
-        d.text((x, yy), line, font=F(37, weight="bold"), fill=DESIGN["ink"])
-        yy += S(43)
+        d.text((x, yy), line, font=name_font, fill=DESIGN["ink"])
+        yy += line_spacing
     # RSBSA number: full-width panel using the whole detail column, with
     # the number auto-fitted as large as the available space allows.
     rsbsa_t = str(farmer.get('rsbsa_number') or '—')
@@ -454,10 +470,11 @@ def batch_a4_pdf(card_items: list) -> bytes:
             d.line([back_x + target_card_w + 2, y - 1, back_x + target_card_w + 12, y - 1], fill=guide_color, width=1)
             d.line([back_x + target_card_w + 2, y + target_card_h, back_x + target_card_w + 12, y + target_card_h], fill=guide_color, width=1)
 
-            # Label on outer margin
+            # Label on outer margin (clearly separated above cutting guides)
             label = item.get("label") or f"Farmer ID #{chunk_idx + row_idx + 1}"
-            d.text((front_x, y - 16), f"FRONT  ·  {label}", font=F(11, weight="med"), fill=(140, 145, 140))
-            d.text((back_x, y - 16), f"BACK  ·  {label}", font=F(11, weight="med"), fill=(140, 145, 140))
+            label_y = max(8, y - 20)
+            d.text((front_x, label_y), f"FRONT  ·  {label}", font=F(11, weight="med"), fill=(120, 125, 120))
+            d.text((back_x, label_y), f"BACK  ·  {label}", font=F(11, weight="med"), fill=(120, 125, 120))
 
         pages.append(page)
 

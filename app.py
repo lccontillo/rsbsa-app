@@ -782,7 +782,7 @@ def get_messages():
                 "LEFT JOIN barangays b ON b.id = u.barangay_id "
                 "WHERE u.role = 'secretary' AND u.active = 1 "
                 "ORDER BY unread DESC, last_sent_at DESC, u.full_name ASC",
-                (g.user["id"], g.user["id"], g.user["id"], g.user["id"])
+                (g.user["id"], g.user["id"], g.user["id"], g.user["id"], g.user["id"])
             ).fetchall()
             broadcast_unread = g.db.execute(
                 "SELECT COUNT(*) FROM messages WHERE is_broadcast = 1 AND sender_id != ? AND read_at IS NULL",
@@ -845,6 +845,18 @@ def send_message():
     )
     g.db.commit()
     return jsonify(ok=True, id=cur.lastrowid, sent_at=now, recipient_id=recipient_id)
+
+
+@app.delete("/api/messages/<int:mid>")
+@admin_required
+def delete_message(mid):
+    msg = g.db.execute("SELECT * FROM messages WHERE id = ?", (mid,)).fetchone()
+    if msg is None:
+        return _err("Message or announcement not found.", 404)
+    g.db.execute("DELETE FROM messages WHERE id = ?", (mid,))
+    _audit("announcement.delete", f"Admin deleted announcement #{mid}: '{msg['message'][:60]}'")
+    g.db.commit()
+    return jsonify(ok=True, id=mid)
 
 
 @app.post("/api/messages/mark-read")
@@ -1849,6 +1861,11 @@ def list_farmers():
     sql += " ORDER BY f.last_seen DESC LIMIT 500"
     rows = [dict(r) for r in g.db.execute(sql, args).fetchall()]
     _overlay_id_generator_status(rows)
+    id_status = (request.args.get("id_status") or "").strip().lower()
+    if id_status in ("generated", "1"):
+        rows = [r for r in rows if r.get("id_control_no")]
+    elif id_status in ("not_generated", "not_yet_generated", "not yet generated", "0"):
+        rows = [r for r in rows if not r.get("id_control_no")]
     return jsonify(rows)
 
 
@@ -1964,6 +1981,8 @@ def create_farmer():
             ("FARMER_NAME", "FARMER_NAME"), ("name", "FARMER_NAME"),
             ("CIVIL_STATUS", "CIVIL_STATUS"), ("civil_status", "CIVIL_STATUS"),
             ("ADDRESS", "ADDRESS"), ("address", "ADDRESS"),
+            ("GENDER", "GENDER"), ("gender", "GENDER"),
+            ("BIRTHDATE", "BIRTHDATE"), ("birthdate", "BIRTHDATE"),
             ("FARM_AREA", "FARM_AREA"), ("farm_area", "FARM_AREA"),
             ("PARCEL_LOCATION", "PARCEL_LOCATION"),
             ("parcel_location", "PARCEL_LOCATION"),
@@ -1972,6 +1991,8 @@ def create_farmer():
             data[dst] = str(data_in[src]).strip().upper()
     if data.get("CIVIL_STATUS"):
         data["CIVIL_STATUS"] = _normalize_civil_status(data["CIVIL_STATUS"])
+    if data.get("GENDER"):
+        data["GENDER"] = db_id.normalize_gender(data["GENDER"])
     data["RSBSA_NUMBER"] = rsbsa
     data["FARMER_NAME"] = name
 
@@ -2280,7 +2301,13 @@ def export_farmers_csv():
         sql += " AND f.remarks = ?"
         args.append(remarks)
     sql += " ORDER BY f.name ASC LIMIT 10000"
-    rows = g.db.execute(sql, args).fetchall()
+    rows = [dict(r) for r in g.db.execute(sql, args).fetchall()]
+    _overlay_id_generator_status(rows)
+    id_status = (request.args.get("id_status") or "").strip().lower()
+    if id_status in ("generated", "1"):
+        rows = [r for r in rows if r.get("id_control_no")]
+    elif id_status in ("not_generated", "not_yet_generated", "not yet generated", "0"):
+        rows = [r for r in rows if not r.get("id_control_no")]
     buf = io.StringIO()
     writer = _csv.writer(buf)
     writer.writerow(["RSBSA Number", "Farmer Name", "Remarks", "Pending Remarks",
@@ -2389,14 +2416,25 @@ def sync_farmers_from_id_db():
 # Farmer's ID Card Maker (admin only; secretaries see the status only)
 # --------------------------------------------------------------------------- #
 def _fmt_long_date(iso):
-    """'1980-01-05' -> 'Jan 5, 1980' (non-ISO text passes through)."""
+    """'1980-01-05' -> 'Jan 5, 1980' (handles dates, date-times, and common formats; non-date text passes through)."""
     if not iso:
         return ""
+    s = str(iso).strip()
+    if not s:
+        return ""
+    # Try common formats
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y", "%m-%d-%Y", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            d = datetime.datetime.strptime(s[:10], fmt)
+            return d.strftime("%b ") + str(d.day) + d.strftime(", %Y")
+        except ValueError:
+            pass
     try:
-        d = datetime.datetime.strptime(str(iso)[:10], "%Y-%m-%d")
+        # Fallback ISO parser
+        d = datetime.date.fromisoformat(s[:10])
         return d.strftime("%b ") + str(d.day) + d.strftime(", %Y")
-    except ValueError:
-        return str(iso)
+    except Exception:
+        return s
 
 
 def _org_line():
@@ -2767,10 +2805,16 @@ def _render_id_person_files(person, card):
     pkeys = person.keys() if hasattr(person, "keys") else person
     gender = person["gender"] or ""
     bdate = person["birthdate"] or ""
-    if (not gender or not bdate) and person.get("source_farmer_id"):
+    if not gender or not bdate:
         try:
-            sf = g.db.execute("SELECT gender, birthdate, data_json FROM farmers WHERE id = ?",
-                              (person["source_farmer_id"],)).fetchone()
+            sf = None
+            if person.get("source_farmer_id"):
+                sf = g.db.execute("SELECT id, gender, birthdate, data_json FROM farmers WHERE id = ?",
+                                  (person["source_farmer_id"],)).fetchone()
+            if sf is None and person.get("rsbsa_number"):
+                rkey = db_id.rsbsa_key(person["rsbsa_number"])
+                sf = g.db.execute("SELECT id, gender, birthdate, data_json FROM farmers WHERE rsbsa_key = ?",
+                                  (rkey,)).fetchone()
             if sf:
                 if not gender:
                     gender = sf["gender"] or ""
@@ -2787,6 +2831,18 @@ def _render_id_person_files(person, card):
                             bdate = d.get("BIRTHDATE") or d.get("BIRTHDAY") or d.get("DATE_OF_BIRTH") or ""
                         except Exception:
                             pass
+                # If we retrieved gender or birthdate, keep id_persons up to date
+                norm_gen = db_id.normalize_gender(gender) if gender else None
+                if norm_gen or bdate:
+                    conn = _id_conn()
+                    try:
+                        conn.execute("UPDATE id_persons SET gender = COALESCE(?, gender), "
+                                     "birthdate = COALESCE(?, birthdate), "
+                                     "source_farmer_id = COALESCE(?, source_farmer_id) WHERE id = ?",
+                                     (norm_gen, bdate or None, sf["id"], person["id"]))
+                        conn.commit()
+                    finally:
+                        conn.close()
         except Exception:
             pass
     payload = {
@@ -2935,6 +2991,7 @@ def idgen_persons():
     bgy = (request.args.get("barangay") or "").strip()
     rem = (request.args.get("remarks") or "").strip()
     printed = request.args.get("printed")
+    id_status = (request.args.get("id_status") or "").strip().lower()
     page = request.args.get("page", type=int) or 1
     limit = request.args.get("limit")
 
@@ -2953,6 +3010,10 @@ def idgen_persons():
         if rem:
             where.append("COALESCE(p.remarks, 'Active') = ?")
             params.append(rem)
+        if id_status in ("generated", "1"):
+            where.append("c.control_no IS NOT NULL")
+        elif id_status in ("not_generated", "not yet generated", "not_yet_generated", "0"):
+            where.append("c.control_no IS NULL")
         if printed == "1":
             where.append("c.is_printed = 1")
         elif printed == "0":
@@ -3316,7 +3377,7 @@ def idgen_candidates():
             "SELECT rsbsa_key, id FROM id_persons").fetchall()}
     finally:
         conn.close()
-    sql = "SELECT f.id, f.name, f.rsbsa_number FROM farmers f"
+    sql = "SELECT f.id, f.name, f.rsbsa_number, f.gender, f.data_json FROM farmers f"
     args = []
     if q:
         sql += " WHERE f.name LIKE ? OR f.rsbsa_number LIKE ?"
@@ -3325,9 +3386,15 @@ def idgen_candidates():
     out = []
     for f in g.db.execute(sql, args).fetchall():
         pid = keys.get(db_id.rsbsa_key(f["rsbsa_number"] or ""))
+        gen = f["gender"] or ""
+        if not gen:
+            try:
+                gen = json.loads(f["data_json"] or "{}").get("GENDER") or ""
+            except Exception:
+                pass
         out.append({"farmer_id": f["id"], "name": f["name"],
                     "rsbsa_number": f["rsbsa_number"],
-                    "gender": None,
+                    "gender": db_id.normalize_gender(gen) if gen else None,
                     "in_id_db": pid is not None, "id_person_id": pid})
     return jsonify(out)
 
@@ -3363,19 +3430,38 @@ def idgen_copy_masterlist():
                                 "rsbsa": rsbsa, "reason": "Already in ID database"})
                 continue
             now = db.now_iso()
+            fkeys = f.keys() if hasattr(f, "keys") else []
+            gen_val = f["gender"] if "gender" in fkeys and f["gender"] else ""
+            bdate_val = f["birthdate"] if "birthdate" in fkeys and f["birthdate"] else ""
+            if not gen_val or not bdate_val:
+                try:
+                    d = json.loads(f["data_json"] or "{}")
+                    if not gen_val:
+                        gen_val = d.get("GENDER") or d.get("SEX") or d.get("KASARIAN") or ""
+                    if not bdate_val:
+                        bdate_val = d.get("BIRTHDATE") or d.get("BIRTHDAY") or d.get("DATE_OF_BIRTH") or d.get("DOB") or ""
+                except Exception:
+                    pass
+            norm_gen = db_id.normalize_gender(gen_val) if gen_val else None
+            # Lookup barangay name
+            bgy_name = None
+            if f.get("barangay_id"):
+                brow = g.db.execute("SELECT name FROM barangays WHERE id = ?", (f["barangay_id"],)).fetchone()
+                if brow:
+                    bgy_name = brow["name"]
             fca_val = db_id.remember_fca(
                 conn, f["affiliated_fca"] if "affiliated_fca" in f.keys() else "")
             cur = conn.execute(
                 "INSERT INTO id_persons (rsbsa_key, rsbsa_number, name, "
                 "gender, civil_status, address, birthdate, contact_number, "
-                "emergency_contact, affiliated_fca, photo_path, source, "
+                "emergency_contact, affiliated_fca, barangay, photo_path, source, "
                 "source_farmer_id, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'masterlist', ?, ?, ?)",
-                (db_id.rsbsa_key(rsbsa), rsbsa, f["name"], None,
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'masterlist', ?, ?, ?)",
+                (db_id.rsbsa_key(rsbsa), rsbsa, f["name"], norm_gen,
                  db_id.normalize_civil_status(f["civil_status"]),
-                 f["address"], f["birthdate"],
+                 f["address"], bdate_val or None,
                  f["contact_number"], f["emergency_contact"],
-                 fca_val or None, None, fid, now, now))
+                 fca_val or None, bgy_name, None, fid, now, now))
             pid = cur.lastrowid
             if f["photo_path"]:
                 src = os.path.join(db.INSTANCE_DIR, f["photo_path"])

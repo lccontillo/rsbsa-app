@@ -319,6 +319,8 @@ def upsert_farmer(conn: sqlite3.Connection, *, rsbsa_number, name,
     num = (rsbsa_number or "").strip() or None
     cs = str(data.get("CIVIL_STATUS", "")).strip()
     addr = str(data.get("ADDRESS", "")).strip()
+    gender = str(data.get("GENDER", "")).strip()
+    bdate = str(data.get("BIRTHDATE", "")).strip()
     row = conn.execute("SELECT id FROM farmers WHERE rsbsa_key = ?",
                        (key,)).fetchone()
     if row:
@@ -327,17 +329,19 @@ def upsert_farmer(conn: sqlite3.Connection, *, rsbsa_number, name,
             "rsbsa_number = COALESCE(?, rsbsa_number), "
             "civil_status = COALESCE(NULLIF(?, ''), civil_status), "
             "address = COALESCE(NULLIF(?, ''), address), "
+            "gender = COALESCE(NULLIF(?, ''), gender), "
+            "birthdate = COALESCE(NULLIF(?, ''), birthdate), "
             "data_json = ?, last_seen = ? WHERE id = ?",
-            (name, num, cs, addr, json.dumps(data), now, row["id"]),
+            (name, num, cs, addr, gender, bdate, json.dumps(data), now, row["id"]),
         )
         return row["id"], False
     cur = conn.execute(
         "INSERT INTO farmers (rsbsa_key, rsbsa_number, name, civil_status, "
-        "address, data_json, barangay_id, first_seen, last_seen, "
+        "address, gender, birthdate, data_json, barangay_id, first_seen, last_seen, "
         "verification_status) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')",
-        (key, num, name, cs or None, addr or None, json.dumps(data),
-         barangay_id, now, now),
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')",
+        (key, num, name, cs or None, addr or None, gender or None, bdate or None,
+         json.dumps(data), barangay_id, now, now),
     )
     return cur.lastrowid, True
 
