@@ -37,7 +37,10 @@ try:
 except Exception:  # qrcode / Pillow not installed
     idgen = None
 
+from flask_sock import Sock
+
 app = Flask(__name__, static_folder="static", static_url_path="/static")
+sock = Sock(app)
 
 # Persistent session secret so restarts keep people logged in.
 _secret_file = os.path.join(db.INSTANCE_DIR, "secret_key")
@@ -822,8 +825,22 @@ def send_message():
             "VALUES (?, NULL, ?, ?, 1)",
             (g.user["id"], msg, now)
         )
+        mid = cur.lastrowid
         g.db.commit()
-        return jsonify(ok=True, id=cur.lastrowid, sent_at=now, is_broadcast=True)
+        _ws_broadcast({
+            "type": "new_message",
+            "message": {
+                "id": mid,
+                "sender_id": g.user["id"],
+                "sender_name": g.user["full_name"],
+                "sender_role": g.user["role"],
+                "recipient_id": None,
+                "message": msg,
+                "sent_at": now,
+                "is_broadcast": 1
+            }
+        })
+        return jsonify(ok=True, id=mid, sent_at=now, is_broadcast=True)
 
     if g.user["role"] == "secretary":
         admin_user = g.db.execute("SELECT id FROM users WHERE role = 'admin' LIMIT 1").fetchone()
@@ -843,8 +860,22 @@ def send_message():
         "VALUES (?, ?, ?, ?, 0)",
         (g.user["id"], recipient_id, msg, now)
     )
+    mid = cur.lastrowid
     g.db.commit()
-    return jsonify(ok=True, id=cur.lastrowid, sent_at=now, recipient_id=recipient_id)
+    _ws_broadcast({
+        "type": "new_message",
+        "message": {
+            "id": mid,
+            "sender_id": g.user["id"],
+            "sender_name": g.user["full_name"],
+            "sender_role": g.user["role"],
+            "recipient_id": recipient_id,
+            "message": msg,
+            "sent_at": now,
+            "is_broadcast": 0
+        }
+    }, target_user_ids={g.user["id"], recipient_id})
+    return jsonify(ok=True, id=mid, sent_at=now, recipient_id=recipient_id)
 
 
 @app.delete("/api/messages/<int:mid>")
@@ -856,6 +887,10 @@ def delete_message(mid):
     g.db.execute("DELETE FROM messages WHERE id = ?", (mid,))
     _audit("announcement.delete", f"Admin deleted announcement #{mid}: '{msg['message'][:60]}'")
     g.db.commit()
+    _ws_broadcast({
+        "type": "delete_message",
+        "message_id": mid
+    })
     return jsonify(ok=True, id=mid)
 
 
@@ -889,6 +924,11 @@ def mark_messages_read():
             (now, g.user["id"], g.user["id"])
         )
     g.db.commit()
+    _ws_broadcast({
+        "type": "messages_read",
+        "user_id": g.user["id"],
+        "partner_id": partner_id
+    }, target_user_ids=({g.user["id"], int(partner_id)} if partner_id else None))
     return jsonify(ok=True)
 
 
@@ -902,6 +942,138 @@ def unread_messages_count():
         (g.user["id"], g.user["id"])
     ).fetchone()[0]
     return jsonify(unread=cnt)
+
+
+# --------------------------------------------------------------------------- #
+# WebSocket Chat & Presence Hub
+# --------------------------------------------------------------------------- #
+_ws_clients_lock = threading.Lock()
+# map ws -> user_dict {id, username, full_name, role, barangay_name, barangay_id}
+_ws_clients = {}
+
+def _ws_broadcast(payload_dict, target_user_ids=None):
+    """Safely send a JSON message to connected WebSocket clients."""
+    data = json.dumps(payload_dict)
+    with _ws_clients_lock:
+        clients_snapshot = list(_ws_clients.items())
+    for ws, u in clients_snapshot:
+        if target_user_ids is not None and u["id"] not in target_user_ids:
+            continue
+        try:
+            ws.send(data)
+        except Exception:
+            pass
+
+def _ws_get_online_user_ids():
+    with _ws_clients_lock:
+        return sorted(list({u["id"] for u in _ws_clients.values()}))
+
+def _ws_broadcast_presence():
+    online_ids = _ws_get_online_user_ids()
+    _ws_broadcast({
+        "type": "presence",
+        "online_user_ids": online_ids,
+        "timestamp": db.now_iso()
+    })
+
+@sock.route("/ws/chat")
+def ws_chat_socket(ws):
+    uid = session.get("user_id")
+    if not uid:
+        try:
+            ws.send(json.dumps({"type": "error", "message": "Unauthorized"}))
+            ws.close()
+        except Exception:
+            pass
+        return
+
+    conn = db.connect()
+    try:
+        user_row = conn.execute(
+            "SELECT u.id, u.username, u.full_name, u.role, u.barangay_id, b.name AS barangay_name "
+            "FROM users u LEFT JOIN barangays b ON b.id = u.barangay_id "
+            "WHERE u.id = ? AND u.active = 1", (uid,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not user_row:
+        try:
+            ws.close()
+        except Exception:
+            pass
+        return
+
+    u_info = {
+        "id": user_row["id"],
+        "username": user_row["username"],
+        "full_name": user_row["full_name"],
+        "role": user_row["role"],
+        "barangay_id": user_row["barangay_id"],
+        "barangay_name": user_row["barangay_name"] or "",
+    }
+
+    with _ws_clients_lock:
+        _ws_clients[ws] = u_info
+
+    # Send initial connected message with current presence
+    try:
+        ws.send(json.dumps({
+            "type": "connected",
+            "me": u_info,
+            "online_user_ids": _ws_get_online_user_ids(),
+            "timestamp": db.now_iso()
+        }))
+    except Exception:
+        pass
+
+    _ws_broadcast_presence()
+
+    try:
+        while True:
+            raw = ws.receive()
+            if raw is None:
+                break
+            try:
+                pkt = json.loads(raw)
+            except Exception:
+                continue
+
+            ptype = pkt.get("type")
+            if ptype == "ping":
+                try:
+                    ws.send(json.dumps({"type": "pong", "timestamp": db.now_iso()}))
+                except Exception:
+                    pass
+            elif ptype == "typing":
+                # Forward typing status to relevant peer
+                target_id = pkt.get("recipient_id")
+                is_bc = bool(pkt.get("is_broadcast", False))
+                targets = None
+                if not is_bc and target_id:
+                    targets = {int(target_id)}
+                _ws_broadcast({
+                    "type": "typing",
+                    "sender_id": u_info["id"],
+                    "sender_name": u_info["full_name"],
+                    "is_broadcast": is_bc,
+                    "recipient_id": target_id
+                }, target_user_ids=targets)
+            elif ptype == "get_presence":
+                try:
+                    ws.send(json.dumps({
+                        "type": "presence",
+                        "online_user_ids": _ws_get_online_user_ids(),
+                        "timestamp": db.now_iso()
+                    }))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    finally:
+        with _ws_clients_lock:
+            _ws_clients.pop(ws, None)
+        _ws_broadcast_presence()
 
 
 

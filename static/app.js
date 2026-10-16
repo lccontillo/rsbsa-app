@@ -583,11 +583,81 @@ async function fetchOfficeInfo() {
 }
 
 let _heartbeatTimer = null;
+let _ws = null;
+let _wsOnlineUserIds = new Set();
+let _onWsMessageListeners = [];
+
+function addWsListener(fn) {
+  _onWsMessageListeners.push(fn);
+  return () => {
+    _onWsMessageListeners = _onWsMessageListeners.filter((f) => f !== fn);
+  };
+}
+
+function initWebSocket() {
+  if (!ME) {
+    if (_ws) { try { _ws.close(); } catch (_) {} _ws = null; }
+    return;
+  }
+  if (_ws && (_ws.readyState === WebSocket.OPEN || _ws.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+  try {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${proto}//${location.host}/ws/chat`;
+    _ws = new WebSocket(wsUrl);
+
+    _ws.onopen = () => {
+      // connected, ping to keep alive
+    };
+
+    _ws.onmessage = (evt) => {
+      try {
+        const data = JSON.parse(evt.data);
+        if (data.type === "connected" || data.type === "presence") {
+          if (Array.isArray(data.online_user_ids)) {
+            _wsOnlineUserIds = new Set(data.online_user_ids.map(Number));
+          }
+        } else if (data.type === "new_message") {
+          // If message is directed to me or is broadcast from someone else, update unread count
+          if (data.message && (data.message.recipient_id === ME.id || (data.message.is_broadcast && data.message.sender_id !== ME.id))) {
+            const badge = document.getElementById("msg-badge");
+            if (badge) {
+              const cur = parseInt(badge.textContent || "0", 10) || 0;
+              badge.textContent = cur + 1;
+              badge.style.display = "inline-block";
+            }
+          }
+        }
+        _onWsMessageListeners.forEach((fn) => {
+          try { fn(data); } catch (_) {}
+        });
+      } catch (_) {}
+    };
+
+    _ws.onclose = () => {
+      _ws = null;
+      // Reconnect after 3 seconds if user is still logged in
+      if (ME) setTimeout(initWebSocket, 3000);
+    };
+
+    _ws.onerror = () => {
+      try { _ws.close(); } catch (_) {}
+    };
+  } catch (_) {}
+}
+
 function startHeartbeat() {
   if (_heartbeatTimer) clearInterval(_heartbeatTimer);
+  initWebSocket();
   const tick = async () => {
     if (!ME) return;
     try {
+      if (_ws && _ws.readyState === WebSocket.OPEN) {
+        _ws.send(JSON.stringify({ type: "ping" }));
+      } else {
+        initWebSocket();
+      }
       await api("/api/heartbeat", { method: "POST" });
       const { unread } = await api("/api/messages/unread-count");
       const badge = document.getElementById("msg-badge");
@@ -602,7 +672,7 @@ function startHeartbeat() {
     } catch (_) {}
   };
   tick();
-  _heartbeatTimer = setInterval(tick, 20000);
+  _heartbeatTimer = setInterval(tick, 15000);
 }
 
 function changePasswordModal(mandatory = false) {
@@ -862,6 +932,67 @@ async function openMessengerModal() {
           }
         } catch (err) { bodyEl.innerHTML = `<div class="notice warn">${esc(err.message)}</div>`; }
       }
+    }
+
+    let removeWs = null;
+
+    function handleWsEvent(evt) {
+      if (!evt) return;
+      if (evt.type === "presence" || evt.type === "connected") {
+        if (activeTab === "active" && isAdmin) {
+          // Refresh active secretaries list live
+          loadTab();
+        } else if (activeTab === "direct" && isAdmin) {
+          const sel = document.getElementById("chat-sec-select");
+          if (sel) {
+            Array.from(sel.options).forEach((opt) => {
+              const sid = Number(opt.value);
+              const isOnline = _wsOnlineUserIds.has(sid);
+              const baseText = opt.textContent.replace(/^🟢\s*/, "");
+              opt.textContent = (isOnline ? "🟢 " : "") + baseText;
+            });
+          }
+        }
+      } else if (evt.type === "new_message" && evt.message) {
+        const m = evt.message;
+        if (m.is_broadcast && activeTab === "broadcast") {
+          loadTab();
+        } else if (!m.is_broadcast && activeTab === "direct") {
+          const isMine = m.sender_id === ME.id;
+          const isPartner = isAdmin ? (m.sender_id === activeSecId || m.recipient_id === activeSecId) : true;
+          if (isPartner) {
+            const stream = document.getElementById("chat-stream");
+            if (stream) {
+              const empty = stream.querySelector(".empty");
+              if (empty) empty.remove();
+              const msgHtml = `
+                <div style="display:flex;flex-direction:column;align-items:${isMine ? "flex-end" : "flex-start"};margin-bottom:10px">
+                  <div style="font-size:11px;color:#777;margin-bottom:2px">${esc(m.sender_name)} · ${fmtDT(m.sent_at || m.created_at)}</div>
+                  <div style="max-width:75%;padding:8px 12px;border-radius:12px;background:${isMine ? "#0f4c81" : "#e2e8f0"};color:${isMine ? "#fff" : "#1a202c"};font-size:13px;word-break:break-word">
+                    ${esc(m.message || m.content || "")}
+                  </div>
+                </div>
+              `;
+              stream.insertAdjacentHTML("beforeend", msgHtml);
+              stream.scrollTop = stream.scrollHeight;
+            }
+            if (!isMine) {
+              api("/api/messages/mark-read", { method: "POST", body: { message_ids: [m.id], partner_id: m.sender_id } }).catch(() => {});
+            }
+          }
+        }
+      } else if (evt.type === "delete_message" && activeTab === "broadcast") {
+        loadTab();
+      }
+    }
+
+    removeWs = addWsListener(handleWsEvent);
+    const origClose = closeModal;
+    const modalCloseBtn = document.getElementById("msg-close");
+    if (modalCloseBtn) {
+      modalCloseBtn.addEventListener("click", () => {
+        if (removeWs) removeWs();
+      });
     }
 
     loadTab();
