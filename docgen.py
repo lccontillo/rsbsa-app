@@ -3,6 +3,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 
@@ -116,24 +117,39 @@ def fill_docx(src_path: str, dst_path: str, mapping: dict) -> None:
 
 
 def _soffice_bin() -> str:
-    return shutil.which("soffice") or shutil.which("libreoffice") or "/usr/bin/soffice"
+    cand = shutil.which("soffice") or shutil.which("libreoffice")
+    if cand:
+        return cand
+    for p in [
+        r"C:\Program Files\LibreOffice\program\soffice.exe",
+        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+        "/usr/bin/soffice",
+        "/usr/local/bin/soffice",
+    ]:
+        if os.path.exists(p):
+            return p
+    return "soffice"
 
 
 def docx_to_pdf(docx_path: str, out_dir: str) -> str:
     """Convert a .docx to PDF with headless LibreOffice. Returns the PDF path."""
     profile = tempfile.mkdtemp(prefix="lo_profile_")
     try:
+        prof_url = profile.replace("\\", "/")
+        if not prof_url.startswith("/"):
+            prof_url = "/" + prof_url
         cmd = [
             _soffice_bin(),
             "--headless", "--nologo", "--nolockcheck",
-            f"-env:UserInstallation=file://{profile}",
+            f"-env:UserInstallation=file://{prof_url}",
             "--convert-to", "pdf",
             "--outdir", out_dir,
             docx_path,
         ]
         env = dict(os.environ)
-        env["HOME"] = "/tmp"
-        env["SAL_USE_VCLPLUGIN"] = "svp"
+        if sys.platform != "win32":
+            env["HOME"] = "/tmp"
+            env["SAL_USE_VCLPLUGIN"] = "svp"
         with _LO_LOCK:
             proc = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=120, env=env,

@@ -24,7 +24,7 @@ import time
 import zipfile
 from functools import wraps
 
-from flask import (Flask, g, jsonify, request, send_file, session,
+from flask import (Flask, Response, g, jsonify, request, send_file, session,
                    send_from_directory)
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -82,6 +82,12 @@ def _load_user():
         ).fetchone()
         if row:
             g.user = row
+            try:
+                g.db.execute("UPDATE users SET last_active_at = ? WHERE id = ?",
+                             (db.now_iso(), uid))
+                g.db.commit()
+            except Exception:
+                pass
 
 
 def login_required(fn):
@@ -120,6 +126,7 @@ def _audit(action, detail="", barangay_id=None, actor=None, role=None):
 def _me_payload():
     if g.user is None:
         return None
+    keys = g.user.keys() if hasattr(g.user, "keys") else []
     return {
         "id": g.user["id"],
         "username": g.user["username"],
@@ -127,6 +134,7 @@ def _me_payload():
         "role": g.user["role"],
         "barangay": g.user["barangay_name"],
         "barangay_id": g.user["barangay_id"],
+        "must_change_password": bool(g.user["must_change_password"]) if "must_change_password" in keys else False,
     }
 
 
@@ -639,6 +647,250 @@ def logout():
 @app.get("/api/auth/me")
 def auth_me():
     return jsonify(me=_me_payload(), needs_setup=not db.has_admin(g.db))
+
+
+@app.post("/api/auth/change-password")
+@login_required
+def change_password():
+    body = request.get_json(silent=True) or {}
+    curr = (body.get("current_password") or "").strip()
+    new_pwd = (body.get("new_password") or "").strip()
+    if not new_pwd or len(new_pwd) < 6:
+        return _err("New password must be at least 6 characters.")
+    user = g.db.execute("SELECT * FROM users WHERE id = ?", (g.user["id"],)).fetchone()
+    if user is None:
+        return _err("User not found.", 404)
+    must_change = bool(user["must_change_password"]) if "must_change_password" in user.keys() else False
+    if not must_change or curr:
+        if not check_password_hash(user["password_hash"], curr):
+            return _err("Incorrect current password.", 400)
+    g.db.execute("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?",
+                 (generate_password_hash(new_pwd), g.user["id"]))
+    _audit("auth.change_password", f"{g.user['full_name']} changed their password")
+    g.db.commit()
+    return jsonify(ok=True)
+
+
+@app.post("/api/heartbeat")
+@login_required
+def heartbeat():
+    now = db.now_iso()
+    try:
+        g.db.execute("UPDATE users SET last_active_at = ? WHERE id = ?",
+                     (now, g.user["id"]))
+        g.db.commit()
+    except Exception:
+        pass
+    unread_cnt = g.db.execute(
+        "SELECT COUNT(*) FROM messages "
+        "WHERE (recipient_id = ? OR (is_broadcast = 1 AND sender_id != ?)) "
+        "AND read_at IS NULL",
+        (g.user["id"], g.user["id"])
+    ).fetchone()[0]
+    return jsonify(ok=True, unread_messages=unread_cnt)
+
+
+@app.get("/api/admin/active-secretaries")
+@admin_required
+def get_active_secretaries():
+    rows = g.db.execute(
+        "SELECT u.id, u.username, u.full_name, u.role, u.barangay_id, u.last_active_at, "
+        "b.name AS barangay_name "
+        "FROM users u "
+        "LEFT JOIN barangays b ON b.id = u.barangay_id "
+        "WHERE u.role = 'secretary' AND u.active = 1 "
+        "ORDER BY u.full_name ASC"
+    ).fetchall()
+    now_dt = datetime.datetime.fromisoformat(db.now_iso())
+    result = []
+    for r in rows:
+        is_online = False
+        last_str = r["last_active_at"]
+        if last_str:
+            try:
+                la_dt = datetime.datetime.fromisoformat(last_str)
+                if (now_dt - la_dt).total_seconds() < 300:  # 5 minutes
+                    is_online = True
+            except Exception:
+                pass
+        result.append({
+            "id": r["id"],
+            "username": r["username"],
+            "full_name": r["full_name"],
+            "barangay": r["barangay_name"] or "—",
+            "barangay_id": r["barangay_id"],
+            "last_active_at": last_str,
+            "is_online": is_online,
+        })
+    return jsonify(secretaries=result)
+
+
+@app.get("/api/messages")
+@login_required
+def get_messages():
+    partner_id = request.args.get("partner_id")
+    group = request.args.get("group")
+    broadcast_only = request.args.get("broadcast_only") == "1"
+    direct_only = request.args.get("direct_only") == "1"
+
+    if group == "1" or broadcast_only:
+        rows = g.db.execute(
+            "SELECT m.*, u.full_name AS sender_name, u.role AS sender_role "
+            "FROM messages m "
+            "JOIN users u ON u.id = m.sender_id "
+            "WHERE m.is_broadcast = 1 "
+            "ORDER BY m.id ASC LIMIT 200"
+        ).fetchall()
+        return jsonify(messages=[dict(r) for r in rows])
+
+    if g.user["role"] == "secretary":
+        admin_user = g.db.execute("SELECT id FROM users WHERE role = 'admin' LIMIT 1").fetchone()
+        admin_id = admin_user["id"] if admin_user else None
+        if direct_only:
+            where_clause = "((m.sender_id = ? AND m.recipient_id = ?) OR (m.sender_id = ? AND m.recipient_id = ?)) AND m.is_broadcast = 0"
+        else:
+            where_clause = "(((m.sender_id = ? AND m.recipient_id = ?) OR (m.sender_id = ? AND m.recipient_id = ?)) OR m.is_broadcast = 1)"
+        rows = g.db.execute(
+            f"SELECT m.*, u.full_name AS sender_name, u.role AS sender_role "
+            f"FROM messages m "
+            f"JOIN users u ON u.id = m.sender_id "
+            f"WHERE {where_clause} "
+            f"ORDER BY m.id ASC LIMIT 200",
+            (g.user["id"], admin_id, admin_id, g.user["id"])
+        ).fetchall()
+        return jsonify(messages=[dict(r) for r in rows], partner_id=admin_id)
+    else:
+        if partner_id:
+            rows = g.db.execute(
+                "SELECT m.*, u.full_name AS sender_name, u.role AS sender_role "
+                "FROM messages m "
+                "JOIN users u ON u.id = m.sender_id "
+                "WHERE ((m.sender_id = ? AND m.recipient_id = ?) "
+                "    OR (m.sender_id = ? AND m.recipient_id = ?)) "
+                "  AND m.is_broadcast = 0 "
+                "ORDER BY m.id ASC LIMIT 200",
+                (g.user["id"], partner_id, partner_id, g.user["id"])
+            ).fetchall()
+            return jsonify(messages=[dict(r) for r in rows], partner_id=int(partner_id))
+        else:
+            secs = g.db.execute(
+                "SELECT u.id, u.username, u.full_name, u.last_active_at, b.name AS barangay_name, "
+                "(SELECT COUNT(*) FROM messages m WHERE m.sender_id = u.id AND m.recipient_id = ? AND m.read_at IS NULL) AS unread, "
+                "(SELECT m.message FROM messages m WHERE (m.sender_id = u.id AND m.recipient_id = ?) OR (m.sender_id = ? AND m.recipient_id = u.id) ORDER BY m.id DESC LIMIT 1) AS last_message, "
+                "(SELECT m.sent_at FROM messages m WHERE (m.sender_id = u.id AND m.recipient_id = ?) OR (m.sender_id = ? AND m.recipient_id = u.id) ORDER BY m.id DESC LIMIT 1) AS last_sent_at "
+                "FROM users u "
+                "LEFT JOIN barangays b ON b.id = u.barangay_id "
+                "WHERE u.role = 'secretary' AND u.active = 1 "
+                "ORDER BY unread DESC, last_sent_at DESC, u.full_name ASC",
+                (g.user["id"], g.user["id"], g.user["id"], g.user["id"])
+            ).fetchall()
+            broadcast_unread = g.db.execute(
+                "SELECT COUNT(*) FROM messages WHERE is_broadcast = 1 AND sender_id != ? AND read_at IS NULL",
+                (g.user["id"],)
+            ).fetchone()[0]
+            now_dt = datetime.datetime.fromisoformat(db.now_iso())
+            threads = []
+            for s in secs:
+                d = dict(s)
+                is_online = False
+                if d.get("last_active_at"):
+                    try:
+                        la_dt = datetime.datetime.fromisoformat(d["last_active_at"])
+                        if (now_dt - la_dt).total_seconds() < 300:
+                            is_online = True
+                    except Exception:
+                        pass
+                d["is_online"] = is_online
+                threads.append(d)
+            return jsonify(threads=threads, broadcast_unread=broadcast_unread)
+
+
+@app.post("/api/messages")
+@login_required
+def send_message():
+    body = request.get_json(silent=True) or {}
+    msg = (body.get("message") or body.get("content") or "").strip()
+    if not msg:
+        return _err("Message cannot be empty.")
+    is_broadcast = bool(body.get("is_broadcast", False))
+    now = db.now_iso()
+    if is_broadcast:
+        if g.user["role"] != "admin":
+            return _err("Only administrators can send group/broadcast messages.", 403)
+        cur = g.db.execute(
+            "INSERT INTO messages (sender_id, recipient_id, message, sent_at, is_broadcast) "
+            "VALUES (?, NULL, ?, ?, 1)",
+            (g.user["id"], msg, now)
+        )
+        g.db.commit()
+        return jsonify(ok=True, id=cur.lastrowid, sent_at=now, is_broadcast=True)
+
+    if g.user["role"] == "secretary":
+        admin_user = g.db.execute("SELECT id FROM users WHERE role = 'admin' LIMIT 1").fetchone()
+        if not admin_user:
+            return _err("Administrator account not found.", 404)
+        recipient_id = admin_user["id"]
+    else:
+        recipient_id = body.get("recipient_id")
+        if not recipient_id:
+            return _err("Recipient is required.")
+        try:
+            recipient_id = int(recipient_id)
+        except (TypeError, ValueError):
+            return _err("Invalid recipient.")
+    cur = g.db.execute(
+        "INSERT INTO messages (sender_id, recipient_id, message, sent_at, is_broadcast) "
+        "VALUES (?, ?, ?, ?, 0)",
+        (g.user["id"], recipient_id, msg, now)
+    )
+    g.db.commit()
+    return jsonify(ok=True, id=cur.lastrowid, sent_at=now, recipient_id=recipient_id)
+
+
+@app.post("/api/messages/mark-read")
+@login_required
+def mark_messages_read():
+    body = request.get_json(silent=True) or {}
+    message_ids = body.get("message_ids")
+    partner_id = body.get("partner_id")
+    is_broadcast = bool(body.get("is_broadcast", False))
+    now = db.now_iso()
+    if isinstance(message_ids, list) and message_ids:
+        placeholders = ",".join("?" for _ in message_ids)
+        g.db.execute(
+            f"UPDATE messages SET read_at = ? WHERE id IN ({placeholders}) AND read_at IS NULL",
+            [now] + message_ids
+        )
+    elif is_broadcast:
+        g.db.execute(
+            "UPDATE messages SET read_at = ? WHERE is_broadcast = 1 AND sender_id != ? AND read_at IS NULL",
+            (now, g.user["id"])
+        )
+    elif partner_id:
+        g.db.execute(
+            "UPDATE messages SET read_at = ? WHERE sender_id = ? AND recipient_id = ? AND read_at IS NULL",
+            (now, partner_id, g.user["id"])
+        )
+    else:
+        g.db.execute(
+            "UPDATE messages SET read_at = ? WHERE (recipient_id = ? OR (is_broadcast = 1 AND sender_id != ?)) AND read_at IS NULL",
+            (now, g.user["id"], g.user["id"])
+        )
+    g.db.commit()
+    return jsonify(ok=True)
+
+
+@app.get("/api/messages/unread-count")
+@login_required
+def unread_messages_count():
+    cnt = g.db.execute(
+        "SELECT COUNT(*) FROM messages "
+        "WHERE (recipient_id = ? OR (is_broadcast = 1 AND sender_id != ?)) "
+        "AND read_at IS NULL",
+        (g.user["id"], g.user["id"])
+    ).fetchone()[0]
+    return jsonify(unread=cnt)
+
 
 
 # --------------------------------------------------------------------------- #
@@ -1158,9 +1410,10 @@ def list_certificates():
     q = (request.args.get("q") or "").strip()
     date_from = request.args.get("from") or ""
     date_to = request.args.get("to") or ""
+    tpl_id = request.args.get("template_id") or ""
     sql = (
         "SELECT c.id, c.cert_no, c.farmer_name, c.generated_at, c.pdf_path, "
-        "c.pdf_file_created_at, c.pdf_purged_at, "
+        "c.pdf_file_created_at, c.pdf_purged_at, c.template_id, c.data_json, "
         "r.ref_no, b.name AS barangay, t.name AS template, u.full_name AS generator "
         "FROM certificates c "
         "JOIN requests r ON r.id = c.request_id "
@@ -1172,6 +1425,9 @@ def list_certificates():
     if bgy is not None:
         sql += " AND c.barangay_id = ?"
         args.append(bgy)
+    if tpl_id:
+        sql += " AND c.template_id = ?"
+        args.append(tpl_id)
     if q:
         sql += " AND (c.cert_no LIKE ? OR c.farmer_name LIKE ? OR r.ref_no LIKE ?)"
         like = f"%{q}%"
@@ -1190,16 +1446,19 @@ def list_certificates():
         _basis, expires, available = _cert_pdf_state(r)
         item["pdf_expires_at"] = expires
         item["pdf_available"] = available
+        try:
+            item["data"] = json.loads(r["data_json"] or "{}")
+        except Exception:
+            item["data"] = {}
         out.append(item)
     return jsonify(out)
 
 
-def _regenerate_certificate_pdf(cert):
+def _regenerate_certificate_pdf(cert, regen_time=None):
     """Rebuild a certificate PDF from its permanently stored data.
 
-    Reproduces the original certificate (same cert no., issue date and
-    timestamp) from the request's stored entries. The intermediate DOCX
-    lives only in a temp folder and is deleted immediately.
+    Updates the issue date to the regeneration date.
+    The intermediate DOCX lives only in a temp folder and is deleted immediately.
     """
     tpl = _load_template(cert["template_id"])
     if tpl is None:
@@ -1227,7 +1486,7 @@ def _regenerate_certificate_pdf(cert):
     entries = db.entries_of(req["data_json"])
     entry = entries[idx] if idx < len(entries) else {}
     fields = _fields_of(tpl)
-    generated_at = cert["generated_at"]
+    generated_at = regen_time or cert["generated_at"]
     mapping = dict(entry)
     for f in fields:
         if f.get("type") == "date" and mapping.get(f["key"]):
@@ -1270,8 +1529,7 @@ def _regenerate_certificate_pdf(cert):
 def regenerate_certificate(cid):
     """Create a fresh PDF copy after the retained copy was purged.
 
-    The certificate database record is unchanged (same number and issue
-    date); only a new PDF file is produced, with a fresh 30-day retention.
+    The issue date is updated to the date of regeneration.
     """
     row = g.db.execute(
         "SELECT c.*, r.ref_no FROM certificates c "
@@ -1285,25 +1543,41 @@ def regenerate_certificate(cid):
     if available:
         return jsonify(ok=True, already_available=True,
                        cert_no=row["cert_no"], pdf_expires_at=expires)
+    now = db.now_iso()
     try:
-        pdf_path = _regenerate_certificate_pdf(row)
+        pdf_path = _regenerate_certificate_pdf(row, regen_time=now)
     except Exception as exc:  # noqa: BLE001
         return _err(f"PDF regeneration failed: {exc}", 500)
-    now = db.now_iso()
     g.db.execute(
-        "UPDATE certificates SET pdf_path = ?, pdf_file_created_at = ?, "
+        "UPDATE certificates SET generated_at = ?, pdf_path = ?, pdf_file_created_at = ?, "
         "pdf_purged_at = NULL WHERE id = ?",
-        (os.path.relpath(pdf_path, db.BASE_DIR), now, cid))
+        (now, os.path.relpath(pdf_path, db.BASE_DIR), now, cid))
     new_expires = _pdf_expires_at(now)
     _audit("certificate.pdf_regenerate",
-           f"{row['cert_no']} PDF regenerated after retention purge; "
-           f"fresh {PDF_RETENTION_DAYS}-day retention until "
-           f"{(new_expires or '')[:10]} — original certificate record "
-           "unchanged, no database record deleted",
+           f"{row['cert_no']} PDF regenerated after retention purge — issue date updated to {now[:10]}; "
+           f"fresh {PDF_RETENTION_DAYS}-day retention until {(new_expires or '')[:10]}",
            barangay_id=row["barangay_id"])
     g.db.commit()
     return jsonify(ok=True, cert_no=row["cert_no"],
                    regenerated_at=now, pdf_expires_at=new_expires)
+
+
+@app.get("/api/certificates/<int:cid>/preview")
+@login_required
+def preview_certificate(cid):
+    row = g.db.execute(
+        "SELECT c.*, r.ref_no FROM certificates c "
+        "JOIN requests r ON r.id = c.request_id WHERE c.id = ?", (cid,)
+    ).fetchone()
+    if row is None:
+        return _err("Certificate not found.", 404)
+    if _scope_barangay_id() is not None and row["barangay_id"] != _scope_barangay_id():
+        return _err("This certificate belongs to another barangay.", 403)
+    _basis, _expires, available = _cert_pdf_state(row)
+    if not available:
+        return _err("PDF file is not available (purged).", 410)
+    return send_file(os.path.join(db.BASE_DIR, row["pdf_path"]),
+                     as_attachment=False, mimetype="application/pdf")
 
 
 @app.get("/api/certificates/<int:cid>/download/<fmt>")
@@ -1532,7 +1806,13 @@ def export_certificate_data():
 @login_required
 def list_farmers():
     bgy = _scope_barangay_id()
+    if bgy is None and request.args.get("barangay_id"):
+        try:
+            bgy = int(request.args.get("barangay_id"))
+        except ValueError:
+            pass
     q = (request.args.get("q") or "").strip()
+    remarks = (request.args.get("remarks") or "").strip()
     sql = (
         "SELECT f.*, b.name AS barangay, "
         "(SELECT fi.control_no FROM farmer_ids fi "
@@ -1559,11 +1839,14 @@ def list_farmers():
     if q:
         sql += " AND (f.name LIKE ? OR f.rsbsa_number LIKE ?)"
         args += [f"%{q}%", f"%{q}%"]
+    if remarks and remarks.lower() != "all":
+        sql += " AND f.remarks = ?"
+        args.append(remarks)
     status = (request.args.get("status") or "").strip()
     if status in ("new", "verified"):
         sql += " AND f.verification_status = ?"
         args.append(status)
-    sql += " ORDER BY f.last_seen DESC LIMIT 300"
+    sql += " ORDER BY f.last_seen DESC LIMIT 500"
     rows = [dict(r) for r in g.db.execute(sql, args).fetchall()]
     _overlay_id_generator_status(rows)
     return jsonify(rows)
@@ -1733,6 +2016,7 @@ def farmer_detail(fid):
         "FROM request_farmers rf JOIN requests r ON r.id = rf.request_id "
         "JOIN templates t ON t.id = r.template_id "
         "WHERE rf.farmer_id = ? ORDER BY r.id DESC", (fid,)).fetchall()
+    f_dict = dict(f)
     return jsonify(
         id=f["id"], name=f["name"], rsbsa_number=f["rsbsa_number"],
         civil_status=f["civil_status"], address=f["address"],
@@ -1742,6 +2026,10 @@ def farmer_detail(fid):
             f["verification_status"]
             if "verification_status" in f.keys() else "verified"),
         verified_at=(f["verified_at"] if "verified_at" in f.keys() else None),
+        remarks=f_dict.get("remarks") or "Active",
+        pending_remarks=f_dict.get("pending_remarks"),
+        pending_remarks_by=f_dict.get("pending_remarks_by"),
+        pending_remarks_at=f_dict.get("pending_remarks_at"),
         birthdate=f["birthdate"], contact_number=f["contact_number"],
         emergency_contact=f["emergency_contact"],
         blood_type=f["blood_type"], has_photo=bool(f["photo_path"]),
@@ -1795,12 +2083,18 @@ def update_farmer(fid):
                 f"RSBSA number {rsbsa} is already registered to "
                 f"{other['name']}.", 409)
     data = json.loads(f["data_json"] or "{}")
+    remarks = body.get("remarks") or f["remarks"] or "Active"
+    gender = db_id.normalize_gender(body.get("gender") or f["gender"] or "")
     data.update({"FARMER_NAME": name, "RSBSA_NUMBER": rsbsa,
                  "CIVIL_STATUS": civil, "ADDRESS": address})
+    if gender:
+        data["GENDER"] = gender
     changes = []
     for label, old, new in (
             ("Name", f["name"], name),
             ("RSBSA Number", f["rsbsa_number"] or "", rsbsa),
+            ("Remarks", f["remarks"] or "Active", remarks),
+            ("Gender", f["gender"] or "", gender),
             ("Civil Status", f["civil_status"] or "", civil),
             ("Address", f["address"] or "", address),
             ("Birthdate", f["birthdate"] or "", birthdate),
@@ -1815,11 +2109,14 @@ def update_farmer(fid):
             "UPDATE farmers SET rsbsa_key = ?, rsbsa_number = ?, name = ?, "
             "civil_status = ?, address = ?, barangay_id = ?, data_json = ?, "
             "birthdate = ?, contact_number = ?, emergency_contact = ?, "
-            "blood_type = ?, affiliated_fca = ?, last_seen = ? WHERE id = ?",
+            "blood_type = ?, affiliated_fca = ?, remarks = ?, gender = ?, "
+            "pending_remarks = NULL, pending_remarks_by = NULL, pending_remarks_at = NULL, "
+            "last_seen = ? WHERE id = ?",
             (db.farmer_key(rsbsa, name, barangay_id), rsbsa or None, name,
              civil or None, address or None, barangay_id,
              json.dumps(data), birthdate or None, contact or None,
              emergency or None, blood or None, affiliated_fca or None,
+             remarks, gender or None,
              db.now_iso(), fid))
     except Exception:  # UNIQUE rsbsa_key clash
         g.db.rollback()
@@ -1832,6 +2129,84 @@ def update_farmer(fid):
     g.db.commit()
     return jsonify(ok=True, id=fid, name=name, rsbsa_number=rsbsa,
                    changes=len(changes))
+
+
+@app.post("/api/farmers/<int:fid>/remarks")
+@login_required
+def update_farmer_remarks(fid):
+    body = request.get_json(silent=True) or {}
+    remarks = (body.get("remarks") or "").strip()
+    valid_remarks = ("Active", "Deceased", "No Farm", "OFW",
+                     "Working in other Province", "Severely Sick", "Bedridden")
+    if remarks not in valid_remarks:
+        return _err(f"Invalid remarks choice. Must be one of: {', '.join(valid_remarks)}")
+    f = g.db.execute("SELECT * FROM farmers WHERE id = ?", (fid,)).fetchone()
+    if f is None:
+        return _err("Farmer not found.", 404)
+    if _scope_barangay_id() is not None and f["barangay_id"] != _scope_barangay_id():
+        return _err("This farmer belongs to another barangay.", 403)
+    now = db.now_iso()
+    if g.user["role"] == "admin":
+        g.db.execute(
+            "UPDATE farmers SET remarks = ?, pending_remarks = NULL, "
+            "pending_remarks_by = NULL, pending_remarks_at = NULL WHERE id = ?",
+            (remarks, fid)
+        )
+        _audit("farmer.remarks_update",
+               f"Admin changed remarks for '{f['name']}' to '{remarks}'",
+               barangay_id=f["barangay_id"])
+        g.db.commit()
+        return jsonify(ok=True, remarks=remarks, pending=False)
+    else:
+        # Secretary: must be confirmed and approved first by admin
+        g.db.execute(
+            "UPDATE farmers SET pending_remarks = ?, pending_remarks_by = ?, "
+            "pending_remarks_at = ? WHERE id = ?",
+            (remarks, g.user["id"], now, fid)
+        )
+        _audit("farmer.remarks_request",
+               f"Secretary {g.user['full_name']} requested remarks change for '{f['name']}' to '{remarks}' (pending admin approval)",
+               barangay_id=f["barangay_id"])
+        g.db.commit()
+        return jsonify(ok=True, pending_remarks=remarks, pending=True)
+
+
+@app.post("/api/farmers/<int:fid>/remarks/approve")
+@admin_required
+def approve_farmer_remarks(fid):
+    f = g.db.execute("SELECT * FROM farmers WHERE id = ?", (fid,)).fetchone()
+    if f is None or not f["pending_remarks"]:
+        return _err("No pending remarks change found for this farmer.", 404)
+    new_rem = f["pending_remarks"]
+    g.db.execute(
+        "UPDATE farmers SET remarks = ?, pending_remarks = NULL, "
+        "pending_remarks_by = NULL, pending_remarks_at = NULL WHERE id = ?",
+        (new_rem, fid)
+    )
+    _audit("farmer.remarks_approved",
+           f"Admin approved remarks change for '{f['name']}' to '{new_rem}'",
+           barangay_id=f["barangay_id"])
+    g.db.commit()
+    return jsonify(ok=True, remarks=new_rem)
+
+
+@app.post("/api/farmers/<int:fid>/remarks/reject")
+@admin_required
+def reject_farmer_remarks(fid):
+    f = g.db.execute("SELECT * FROM farmers WHERE id = ?", (fid,)).fetchone()
+    if f is None or not f["pending_remarks"]:
+        return _err("No pending remarks change found for this farmer.", 404)
+    rejected_rem = f["pending_remarks"]
+    g.db.execute(
+        "UPDATE farmers SET pending_remarks = NULL, "
+        "pending_remarks_by = NULL, pending_remarks_at = NULL WHERE id = ?",
+        (fid,)
+    )
+    _audit("farmer.remarks_rejected",
+           f"Admin rejected remarks change request for '{f['name']}' ('{rejected_rem}')",
+           barangay_id=f["barangay_id"])
+    g.db.commit()
+    return jsonify(ok=True)
 
 
 @app.post("/api/farmers/<int:fid>/verify")
@@ -1858,32 +2233,155 @@ def verify_farmer(fid):
 @app.delete("/api/farmers/<int:fid>")
 @admin_required
 def delete_farmer(fid):
-    """Admin deletes a bogus NEW (unverified) farmer record.
-
-    Only unverified records with no issued certificates may be deleted;
-    verified farmers and the certificate archive are never touched.
-    """
+    """Admin deletes a farmer record from the database (new or verified)."""
     f = g.db.execute("SELECT * FROM farmers WHERE id = ?", (fid,)).fetchone()
     if f is None:
         return _err("Farmer not found.", 404)
-    if f["verification_status"] != "new":
-        return _err("Only NEW (unverified) farmer records can be deleted. "
-                    "Verified records are kept permanently.", 409)
-    certs = g.db.execute(
-        "SELECT COUNT(*) AS n FROM certificates c "
-        "JOIN request_farmers rf ON rf.request_id = c.request_id "
-        "WHERE rf.farmer_id = ?", (fid,)).fetchone()["n"]
-    if certs:
-        return _err("This farmer already has issued certificates and "
-                    "cannot be deleted.", 409)
+    # Admin is allowed to delete verified records as explicitly instructed
     g.db.execute("DELETE FROM request_farmers WHERE farmer_id = ?", (fid,))
+    g.db.execute("DELETE FROM farmer_ids WHERE farmer_id = ?", (fid,))
     g.db.execute("DELETE FROM farmers WHERE id = ?", (fid,))
     _audit("farmer.delete",
-           f"Bogus NEW farmer record deleted by admin: '{f['name']}' "
-           f"(RSBSA {f['rsbsa_number'] or '—'}) — no certificates issued",
+           f"Farmer record deleted by admin: '{f['name']}' "
+           f"(RSBSA {f['rsbsa_number'] or '—'}, status: {f['verification_status']})",
            barangay_id=f["barangay_id"])
     g.db.commit()
     return jsonify(ok=True)
+
+
+@app.get("/api/farmers/export-csv")
+@login_required
+def export_farmers_csv():
+    import csv as _csv
+    bgy = _scope_barangay_id()
+    if bgy is None and request.args.get("barangay_id"):
+        try:
+            bgy = int(request.args.get("barangay_id"))
+        except ValueError:
+            pass
+    q = (request.args.get("q") or "").strip()
+    status = (request.args.get("status") or "").strip()
+    remarks = (request.args.get("remarks") or "").strip()
+    sql = (
+        "SELECT f.*, b.name AS barangay FROM farmers f "
+        "LEFT JOIN barangays b ON b.id = f.barangay_id WHERE 1=1"
+    )
+    args = []
+    if bgy is not None:
+        sql += " AND f.barangay_id = ?"
+        args.append(bgy)
+    if q:
+        sql += " AND (f.name LIKE ? OR f.rsbsa_number LIKE ?)"
+        args += [f"%{q}%", f"%{q}%"]
+    if status in ("new", "verified"):
+        sql += " AND f.verification_status = ?"
+        args.append(status)
+    if remarks and remarks.lower() != "all":
+        sql += " AND f.remarks = ?"
+        args.append(remarks)
+    sql += " ORDER BY f.name ASC LIMIT 10000"
+    rows = g.db.execute(sql, args).fetchall()
+    buf = io.StringIO()
+    writer = _csv.writer(buf)
+    writer.writerow(["RSBSA Number", "Farmer Name", "Remarks", "Pending Remarks",
+                     "Verification Status", "Barangay", "Address", "Gender",
+                     "Civil Status", "Birthdate", "First Seen", "Last Seen"])
+    for r in rows:
+        writer.writerow([
+            r["rsbsa_number"] or "",
+            r["name"] or "",
+            r["remarks"] or "Active",
+            r["pending_remarks"] or "",
+            r["verification_status"] or "new",
+            r["barangay"] or "",
+            r["address"] or "",
+            r["gender"] or "",
+            r["civil_status"] or "",
+            r["birthdate"] or "",
+            r["first_seen"] or "",
+            r["last_seen"] or "",
+        ])
+    stamp = db.now_iso()[:10]
+    _audit("farmers.export_csv", f"Exported {len(rows)} farmer records to CSV")
+    g.db.commit()
+    return send_file(io.BytesIO(buf.getvalue().encode("utf-8-sig")),
+                     mimetype="text/csv", as_attachment=True,
+                     download_name=f"farmer_masterlist_{stamp}.csv")
+
+
+@app.post("/api/farmers/sync-from-id-db")
+@admin_required
+def sync_farmers_from_id_db():
+    """Copy/sync all farmers from ID Generator database into Masterlist.
+
+    Does not allow duplicates by detecting RSBSA number, tags all added as verified.
+    """
+    conn_id = _id_conn()
+    try:
+        persons = conn_id.execute("SELECT * FROM id_persons").fetchall()
+    finally:
+        conn_id.close()
+
+    existing_keys = {
+        r["rsbsa_key"] for r in
+        g.db.execute("SELECT rsbsa_key FROM farmers WHERE rsbsa_number IS NOT NULL AND rsbsa_number != ''").fetchall()
+    }
+    bgys = {r["name"].strip().upper(): r["id"] for r in g.db.execute("SELECT id, name FROM barangays").fetchall()}
+    added, skipped = 0, 0
+    now = db.now_iso()
+
+    for p in persons:
+        num = (p["rsbsa_number"] or "").strip().upper()
+        if not num:
+            skipped += 1
+            continue
+        key = db_id.rsbsa_key(num)
+        if key in existing_keys:
+            skipped += 1
+            continue
+
+        b_id = None
+        addr = (p["address"] or "").upper()
+        if p["barangay"]:
+            b_id = bgys.get(p["barangay"].strip().upper())
+        if not b_id and addr:
+            for b_name, b_idx in bgys.items():
+                if b_name in addr:
+                    b_id = b_idx
+                    break
+
+        data_dict = {
+            "FARMER_NAME": p["name"],
+            "RSBSA_NUMBER": num,
+            "CIVIL_STATUS": p["civil_status"] or "",
+            "ADDRESS": p["address"] or "",
+        }
+        if p["gender"]:
+            data_dict["GENDER"] = p["gender"]
+        if p["birthdate"]:
+            data_dict["BIRTHDATE"] = p["birthdate"]
+
+        g.db.execute(
+            "INSERT INTO farmers (rsbsa_key, rsbsa_number, name, civil_status, "
+            "address, data_json, barangay_id, first_seen, last_seen, "
+            "verification_status, verified_by, verified_at, photo_path, "
+            "birthdate, contact_number, emergency_contact, blood_type, "
+            "affiliated_fca, remarks, gender) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'verified', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (key, num, p["name"], p["civil_status"], p["address"],
+             json.dumps(data_dict), b_id, now, now, g.user["id"], now,
+             p["photo_path"], p["birthdate"], p["contact_number"],
+             p["emergency_contact"], "", p["affiliated_fca"],
+             p["remarks"] or "Active", p["gender"])
+        )
+        existing_keys.add(key)
+        added += 1
+
+    _audit("farmer.sync_from_id_db",
+           f"Synced {added} farmer(s) from ID database into Farmer Masterlist; {skipped} duplicate/empty skipped")
+    g.db.commit()
+    return jsonify(ok=True, added=added, skipped=skipped)
+
 
 
 
@@ -1934,14 +2432,30 @@ def _render_id_files(f, row):
         if os.path.exists(p):
             from PIL import Image
             photo = Image.open(p)
+    fkeys = f.keys() if hasattr(f, "keys") else []
+    gender = f["gender"] if "gender" in fkeys and f["gender"] else ""
+    if not gender:
+        try:
+            d = json.loads(f["data_json"] or "{}")
+            gender = d.get("GENDER") or d.get("SEX") or d.get("KASARIAN") or ""
+        except Exception:
+            pass
+    bdate = f["birthdate"] if "birthdate" in fkeys and f["birthdate"] else ""
+    if not bdate:
+        try:
+            d = json.loads(f["data_json"] or "{}")
+            bdate = d.get("BIRTHDATE") or d.get("BIRTHDAY") or d.get("DATE_OF_BIRTH") or d.get("DOB") or ""
+        except Exception:
+            pass
     payload = {
         "name": f["name"], "rsbsa_number": f["rsbsa_number"] or "",
         "civil_status": f["civil_status"] or "",
         "address": f["address"] or "", "barangay": f["barangay"] or "",
-        "birthdate": _fmt_long_date(f["birthdate"]),
+        "gender": db_id.normalize_gender(gender) if gender else "",
+        "birthdate": _fmt_long_date(bdate),
         "blood_type": f["blood_type"] or "",
         "emergency_contact": f["emergency_contact"] or "",
-        "affiliated_fca": (f["affiliated_fca"] if "affiliated_fca" in f.keys() else "") or "",
+        "affiliated_fca": (f["affiliated_fca"] if "affiliated_fca" in fkeys else "") or "",
     }
     org = _org_line()
     front = idgen.render_front(payload, row["control_no"],
@@ -2221,11 +2735,14 @@ def _sync_main_fid_seq(conn_id):
 
 def _id_person_payload(p, card=None):
     pkeys = p.keys() if hasattr(p, "keys") else p
+    ckeys = card.keys() if card and hasattr(card, "keys") else (card or {})
     return {
         "id": p["id"], "rsbsa_number": p["rsbsa_number"],
         "name": p["name"], "gender": p["gender"],
         "civil_status": p["civil_status"],
         "address": p["address"], "birthdate": p["birthdate"],
+        "barangay": (p["barangay"] if "barangay" in pkeys else "") or "",
+        "remarks": (p["remarks"] if "remarks" in pkeys else "Active") or "Active",
         "contact_number": p["contact_number"],
         "emergency_contact": p["emergency_contact"],
         "affiliated_fca": (p["affiliated_fca"] if "affiliated_fca" in pkeys else None),
@@ -2235,6 +2752,8 @@ def _id_person_payload(p, card=None):
         "id_issued_at": card["issued_at"] if card else None,
         "id_valid_until": card["valid_until"] if card else None,
         "id_reprints": card["reprint_count"] if card else 0,
+        "is_printed": bool(card["is_printed"]) if card and "is_printed" in ckeys else False,
+        "printed_at": (card["printed_at"] if card and "printed_at" in ckeys else None),
     }
 
 
@@ -2246,12 +2765,36 @@ def _render_id_person_files(person, card):
             from PIL import Image
             photo = Image.open(pth)
     pkeys = person.keys() if hasattr(person, "keys") else person
+    gender = person["gender"] or ""
+    bdate = person["birthdate"] or ""
+    if (not gender or not bdate) and person.get("source_farmer_id"):
+        try:
+            sf = g.db.execute("SELECT gender, birthdate, data_json FROM farmers WHERE id = ?",
+                              (person["source_farmer_id"],)).fetchone()
+            if sf:
+                if not gender:
+                    gender = sf["gender"] or ""
+                    if not gender:
+                        try:
+                            gender = json.loads(sf["data_json"] or "{}").get("GENDER") or ""
+                        except Exception:
+                            pass
+                if not bdate:
+                    bdate = sf["birthdate"] or ""
+                    if not bdate:
+                        try:
+                            d = json.loads(sf["data_json"] or "{}")
+                            bdate = d.get("BIRTHDATE") or d.get("BIRTHDAY") or d.get("DATE_OF_BIRTH") or ""
+                        except Exception:
+                            pass
+        except Exception:
+            pass
     payload = {
         "name": person["name"], "rsbsa_number": person["rsbsa_number"] or "",
         "civil_status": person["civil_status"] or "",
         "address": person["address"] or "",
-        "gender": person["gender"] or "",
-        "birthdate": _fmt_long_date(person["birthdate"]),
+        "gender": db_id.normalize_gender(gender) if gender else "",
+        "birthdate": _fmt_long_date(bdate),
         "blood_type": "",
         "emergency_contact": person["emergency_contact"] or "",
         "affiliated_fca": (person["affiliated_fca"] if "affiliated_fca" in pkeys else "") or "",
@@ -2388,32 +2931,82 @@ def admin_delete_fca(fid):
 @app.get("/api/id-generator/persons")
 @admin_required
 def idgen_persons():
-    q = (request.args.get("q") or "").strip().lower()
+    q = (request.args.get("q") or "").strip()
+    bgy = (request.args.get("barangay") or "").strip()
+    rem = (request.args.get("remarks") or "").strip()
+    printed = request.args.get("printed")
+    page = request.args.get("page", type=int) or 1
+    limit = request.args.get("limit")
+
     conn = _id_conn()
     try:
-        rows = conn.execute(
-            "SELECT p.*, c.control_no, c.issued_at AS card_issued, "
-            "c.valid_until AS card_valid, c.reprint_count FROM id_persons p "
-            "LEFT JOIN id_cards c ON c.person_id = p.id "
-            "ORDER BY p.name").fetchall()
+        where = ["1=1"]
+        params = []
+        if q:
+            where.append("(LOWER(p.name) LIKE ? OR LOWER(p.rsbsa_number) LIKE ? OR LOWER(COALESCE(p.gender, '')) LIKE ? OR LOWER(COALESCE(p.affiliated_fca, '')) LIKE ?)")
+            like_q = f"%{q.lower()}%"
+            params.extend([like_q, like_q, like_q, like_q])
+        if bgy:
+            where.append("(LOWER(COALESCE(p.barangay, '')) LIKE ? OR LOWER(COALESCE(p.address, '')) LIKE ?)")
+            like_bgy = f"%{bgy.lower()}%"
+            params.extend([like_bgy, like_bgy])
+        if rem:
+            where.append("COALESCE(p.remarks, 'Active') = ?")
+            params.append(rem)
+        if printed == "1":
+            where.append("c.is_printed = 1")
+        elif printed == "0":
+            where.append("(c.control_no IS NOT NULL AND (c.is_printed = 0 OR c.is_printed IS NULL))")
+
+        where_clause = " AND ".join(where)
+        count_sql = f"SELECT COUNT(*) AS n FROM id_persons p LEFT JOIN id_cards c ON c.person_id = p.id WHERE {where_clause}"
+        filtered_count = conn.execute(count_sql, params).fetchone()["n"]
+
+        sql = f"""
+            SELECT p.*, c.control_no, c.issued_at AS card_issued,
+                   c.valid_until AS card_valid, c.reprint_count, c.is_printed, c.printed_at
+            FROM id_persons p
+            LEFT JOIN id_cards c ON c.person_id = p.id
+            WHERE {where_clause}
+            ORDER BY p.name ASC
+        """
+        exec_params = list(params)
+        limit_val = None
+        if limit and limit != "all":
+            try:
+                limit_val = int(limit)
+                offset_val = (page - 1) * limit_val
+                sql += " LIMIT ? OFFSET ?"
+                exec_params.extend([limit_val, offset_val])
+            except ValueError:
+                pass
+
+        rows = conn.execute(sql, exec_params).fetchall()
         out = []
         for p in rows:
             card = None
             if p["control_no"]:
-                card = {"control_no": p["control_no"],
-                        "issued_at": p["card_issued"],
-                        "valid_until": p["card_valid"],
-                        "reprint_count": p["reprint_count"]}
-            item = _id_person_payload(p, card)
-            if q and q not in (item["name"] or "").lower() \
-                    and q not in (item["rsbsa_number"] or "").lower() \
-                    and q not in (item["gender"] or "").lower() \
-                    and q not in (item.get("affiliated_fca") or "").lower():
-                continue
-            out.append(item)
-        total = conn.execute("SELECT COUNT(*) AS n FROM id_persons").fetchone()["n"]
+                card = {
+                    "control_no": p["control_no"],
+                    "issued_at": p["card_issued"],
+                    "valid_until": p["card_valid"],
+                    "reprint_count": p["reprint_count"],
+                    "is_printed": p["is_printed"],
+                    "printed_at": p["printed_at"],
+                }
+            out.append(_id_person_payload(p, card))
+
+        total_all = conn.execute("SELECT COUNT(*) AS n FROM id_persons").fetchone()["n"]
         issued = conn.execute("SELECT COUNT(*) AS n FROM id_cards").fetchone()["n"]
-        return jsonify(persons=out, total=total, issued=issued)
+        return jsonify(
+            persons=out,
+            total=filtered_count,
+            total_all=total_all,
+            issued=issued,
+            page=page,
+            limit=limit_val if limit_val else len(out),
+            total_pages=max(1, (filtered_count + (limit_val or 1) - 1) // (limit_val or 1)) if limit_val else 1,
+        )
     finally:
         conn.close()
 
@@ -2454,10 +3047,14 @@ def idgen_person_update(pid):
         fca = db_id.remember_fca(
             conn, body.get("affiliated_fca")
             if "affiliated_fca" in body else p["affiliated_fca"])
+        barangay = (body.get("barangay") or "").strip()
+        remarks = (body.get("remarks") or "").strip()
+        if not remarks:
+            remarks = (p["remarks"] if "remarks" in p.keys() and p["remarks"] else "Active")
         conn.execute(
             "UPDATE id_persons SET gender = ?, civil_status = ?, "
             "address = ?, birthdate = ?, contact_number = ?, "
-            "emergency_contact = ?, affiliated_fca = ?, updated_at = ? "
+            "emergency_contact = ?, affiliated_fca = ?, barangay = ?, remarks = ?, updated_at = ? "
             "WHERE id = ?",
             (gender or None,
              db_id.normalize_civil_status(body.get("civil_status")),
@@ -2466,6 +3063,8 @@ def idgen_person_update(pid):
              (body.get("contact_number") or "").strip(),
              (body.get("emergency_contact") or "").strip().upper(),
              fca or None,
+             barangay or (p["barangay"] if "barangay" in p.keys() else None),
+             remarks,
              db.now_iso(), pid))
         conn.commit()
         p = conn.execute("SELECT * FROM id_persons WHERE id = ?",
@@ -2574,6 +3173,8 @@ def idgen_import_csv():
         "civil_status": {"civilstatus", "civil"},
         "address": {"address", "homeaddress", "farmeraddress",
                     "residentialaddress"},
+        "barangay": {"barangay", "brgy", "bgy"},
+        "remarks": {"remarks", "status", "farmerstatus", "remark"},
         "birthdate": {"birthdate", "dateofbirth", "dob", "birthday"},
         "contact_number": {"contactnumber", "contact", "contactno",
                            "mobilenumber", "mobile", "phonenumber",
@@ -2598,11 +3199,14 @@ def idgen_import_csv():
     if missing:
         return _err("CSV must include RSBSA Number and Farmer Name. "
                     "Download the template CSV for the full ID fields: "
-                    "Gender, Civil Status, Address, Birthdate, Contact "
+                    "Gender, Civil Status, Address, Barangay, Remarks, Birthdate, Contact "
                     "Number, and Contact Person in Case of Emergency.")
     def _csv_value(row, key):
         col = colmap.get(key)
         return (row.get(col) or "").strip() if col else ""
+
+    bgy_rows = g.db.execute("SELECT id, name FROM barangays").fetchall()
+    bgy_lookup = {r["name"].strip().upper(): r["id"] for r in bgy_rows}
 
     conn = _id_conn()
     try:
@@ -2627,6 +3231,13 @@ def idgen_import_csv():
             civil_status = db_id.normalize_civil_status(
                 _csv_value(row, "civil_status"))
             address = _csv_value(row, "address").upper()
+            barangay = _csv_value(row, "barangay").strip().upper()
+            remarks = _csv_value(row, "remarks").strip() or "Active"
+            if not barangay and address:
+                for bname in bgy_lookup:
+                    if bname in address:
+                        barangay = bname
+                        break
             birthdate_raw = _csv_value(row, "birthdate")
             birthdate = None
             if birthdate_raw:
@@ -2653,18 +3264,40 @@ def idgen_import_csv():
             conn.execute(
                 "INSERT INTO id_persons (rsbsa_key, rsbsa_number, name, "
                 "gender, civil_status, address, birthdate, contact_number, "
-                "emergency_contact, affiliated_fca, source, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'csv', ?, ?)",
+                "emergency_contact, affiliated_fca, barangay, remarks, source, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'csv', ?, ?)",
                 (key, rsbsa, name, gender or None, civil_status,
                  address, birthdate, contact_number, emergency_contact,
-                 affiliated_fca or None, now, now))
+                 affiliated_fca or None, barangay or None, remarks, now, now))
             seen_file.add(key)
             added.append({"row": i, "rsbsa": rsbsa, "name": name})
+
+            # Also sync into Farmer Masterlist with status 'verified' and detect duplicate
+            bgy_id = bgy_lookup.get(barangay) if barangay else None
+            existing_f = g.db.execute("SELECT id FROM farmers WHERE rsbsa_key = ?", (key,)).fetchone()
+            if existing_f:
+                g.db.execute(
+                    "UPDATE farmers SET verification_status = 'verified', "
+                    "remarks = COALESCE(?, remarks), "
+                    "gender = COALESCE(?, gender), "
+                    "birthdate = COALESCE(?, birthdate), "
+                    "barangay_id = COALESCE(?, barangay_id), "
+                    "last_seen = ? WHERE id = ?",
+                    (remarks, gender or None, birthdate or None, bgy_id, now, existing_f["id"]))
+            else:
+                g.db.execute(
+                    "INSERT INTO farmers (rsbsa_key, rsbsa_number, name, gender, civil_status, "
+                    "address, birthdate, contact_number, emergency_contact, affiliated_fca, "
+                    "barangay_id, remarks, verification_status, first_seen, last_seen) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'verified', ?, ?)",
+                    (key, rsbsa, name, gender or None, civil_status,
+                     address, birthdate, contact_number, emergency_contact,
+                     affiliated_fca or None, bgy_id, remarks, now, now))
         conn.commit()
     finally:
         conn.close()
-    _audit("id_db.csv_import",
-           f"ID database CSV upload '{up.filename}': {len(added)} added, "
+    _audit("databases.csv_import",
+           f"Databases CSV upload '{up.filename}': {len(added)} added to both ID Generator and Masterlist (verified), "
            f"{len(duplicates)} duplicate(s) skipped, "
            f"{len(invalid)} invalid row(s) skipped")
     g.db.commit()
@@ -2866,6 +3499,135 @@ def idgen_download_card(pid, kind):
         conn.close()
 
 
+@app.post("/api/id-generator/cards/<int:pid>/tag-printed")
+@admin_required
+def idgen_tag_printed(pid):
+    body = request.get_json(silent=True) or {}
+    is_printed = bool(body.get("is_printed", True))
+    conn = _id_conn()
+    try:
+        card = conn.execute("SELECT * FROM id_cards WHERE person_id = ?", (pid,)).fetchone()
+        if card is None:
+            return _err("No ID card found for this person.", 404)
+        now = db.now_iso() if is_printed else None
+        conn.execute("UPDATE id_cards SET is_printed = ?, printed_at = ? WHERE person_id = ?",
+                     (1 if is_printed else 0, now, pid))
+        conn.commit()
+        _audit("id_card.tag_printed",
+               f"ID card {card['control_no']} tagged as {'printed' if is_printed else 'unprinted'}")
+        g.db.commit()
+        return jsonify(ok=True, is_printed=is_printed, printed_at=now)
+    finally:
+        conn.close()
+
+
+@app.post("/api/id-generator/batch-print")
+@admin_required
+def idgen_batch_print():
+    if idgen is None:
+        return _err("The ID card maker is unavailable on this server.", 503)
+    body = request.get_json(silent=True) or {}
+    pids = body.get("person_ids")
+    conn = _id_conn()
+    try:
+        sql = ("SELECT p.*, c.id AS card_id, c.control_no, c.issued_at, c.valid_until, "
+               "c.reprint_count, c.is_printed FROM id_persons p "
+               "JOIN id_cards c ON c.person_id = p.id ")
+        args = []
+        if pids and isinstance(pids, list):
+            placeholders = ",".join("?" for _ in pids)
+            sql += f"WHERE p.id IN ({placeholders}) "
+            args.extend(pids)
+        else:
+            unprinted_count = conn.execute("SELECT COUNT(*) AS n FROM id_cards WHERE is_printed = 0").fetchone()["n"]
+            if unprinted_count > 0:
+                sql += "WHERE c.is_printed = 0 "
+        sql += "ORDER BY p.name LIMIT 100"
+        rows = conn.execute(sql, args).fetchall()
+        if not rows:
+            return _err("No generated ID cards found to print.")
+
+        from PIL import Image
+        card_items = []
+        card_ids = []
+        for r in rows:
+            ctrl = r["control_no"]
+            front_path = os.path.join(db.ID_CARDS_DIR, f"{ctrl}_FRONT.png")
+            back_path = os.path.join(db.ID_CARDS_DIR, f"{ctrl}_BACK.png")
+            if not os.path.exists(front_path) or not os.path.exists(back_path):
+                try:
+                    _render_id_person_files(dict(r), dict(r))
+                except Exception:
+                    continue
+            if os.path.exists(front_path) and os.path.exists(back_path):
+                f_im = Image.open(front_path).convert("RGB")
+                b_im = Image.open(back_path).convert("RGB")
+                card_items.append({
+                    "front": f_im,
+                    "back": b_im,
+                    "label": f"{r['name']} ({ctrl})"
+                })
+                card_ids.append(r["card_id"])
+
+        if not card_items:
+            return _err("Could not load card image files for batch printing.", 500)
+
+        pdf_bytes = idgen.batch_a4_pdf(card_items)
+        now = db.now_iso()
+        if card_ids:
+            placeholders = ",".join("?" for _ in card_ids)
+            conn.execute(f"UPDATE id_cards SET is_printed = 1, printed_at = ? WHERE id IN ({placeholders})",
+                         [now] + card_ids)
+            conn.commit()
+
+        _audit("id_card.batch_print", f"Batch printed {len(card_items)} ID card(s) onto A4 sheets (5 per sheet)")
+        g.db.commit()
+
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        return send_file(
+            io.BytesIO(pdf_bytes),
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=f"farmer_ids_batch_A4_{stamp}.pdf"
+        )
+    finally:
+        conn.close()
+
+
+@app.delete("/api/id-generator/persons/<int:pid>")
+@admin_required
+def idgen_delete_person(pid):
+    conn = _id_conn()
+    try:
+        p = conn.execute("SELECT * FROM id_persons WHERE id = ?", (pid,)).fetchone()
+        if p is None:
+            return _err("ID record not found.", 404)
+        card = conn.execute("SELECT * FROM id_cards WHERE person_id = ?", (pid,)).fetchone()
+        if card:
+            for fn in (f"{card['control_no']}_FRONT.png", f"{card['control_no']}_BACK.png", f"{card['control_no']}.pdf"):
+                p_file = os.path.join(db.ID_CARDS_DIR, fn)
+                if os.path.exists(p_file):
+                    try:
+                        os.remove(p_file)
+                    except Exception:
+                        pass
+            conn.execute("DELETE FROM id_cards WHERE person_id = ?", (pid,))
+        if p["photo_path"] and p["photo_path"].startswith("photos/id_person_"):
+            p_photo = os.path.join(db.INSTANCE_DIR, p["photo_path"])
+            if os.path.exists(p_photo):
+                try:
+                    os.remove(p_photo)
+                except Exception:
+                    pass
+        conn.execute("DELETE FROM id_persons WHERE id = ?", (pid,))
+        conn.commit()
+        _audit("id_db.delete", f"Deleted ID record '{p['name']}' (RSBSA {p['rsbsa_number']})")
+        g.db.commit()
+        return jsonify(ok=True)
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------- #
 # Dashboard chart data
 # --------------------------------------------------------------------------- #
@@ -3017,6 +3779,153 @@ def report_accomplishment_pdf():
     return resp
 
 
+def _report_farmer_ids_payload():
+    bgy = _scope_barangay_id()
+    if bgy is None and request.args.get("barangay_id"):
+        try:
+            bgy = int(request.args.get("barangay_id"))
+        except ValueError:
+            return None, _err("Invalid barangay.")
+    bgy_name = None
+    if bgy is not None:
+        brow = g.db.execute("SELECT name FROM barangays WHERE id = ?", (bgy,)).fetchone()
+        if brow:
+            bgy_name = brow["name"]
+    elif request.args.get("barangay"):
+        bgy_name = request.args.get("barangay").strip()
+
+    date_from = (request.args.get("from") or "").strip()
+    date_to = (request.args.get("to") or "").strip()
+    month = (request.args.get("month") or "").strip()
+    if month and len(month) == 7:
+        date_from = f"{month}-01"
+        date_to = f"{month}-31"
+
+    conn = _id_conn()
+    try:
+        sql = ("SELECT c.control_no, c.issued_at, c.valid_until, c.reprint_count, "
+               "c.status, c.is_printed, c.printed_at, "
+               "p.name, p.rsbsa_number, p.gender, p.barangay, p.address, p.affiliated_fca "
+               "FROM id_cards c "
+               "JOIN id_persons p ON p.id = c.person_id "
+               "WHERE 1=1 ")
+        args = []
+        if date_from:
+            sql += "AND c.issued_at >= ? "
+            args.append(date_from)
+        if date_to:
+            sql += "AND c.issued_at <= ? "
+            args.append(date_to)
+        sql += "ORDER BY c.issued_at DESC, p.name ASC"
+        raw_rows = [dict(r) for r in conn.execute(sql, args).fetchall()]
+    finally:
+        conn.close()
+
+    rows = []
+    for r in raw_rows:
+        if bgy_name:
+            rbgy = (r.get("barangay") or "").lower()
+            raddr = (r.get("address") or "").lower()
+            if bgy_name.lower() not in rbgy and bgy_name.lower() not in raddr:
+                continue
+        rows.append(r)
+
+    by_bgy = {}
+    by_fca = {}
+    for r in rows:
+        b_key = r.get("barangay") or "Unspecified"
+        by_bgy[b_key] = by_bgy.get(b_key, 0) + 1
+        f_key = r.get("affiliated_fca") or "No FCA"
+        by_fca[f_key] = by_fca.get(f_key, 0) + 1
+
+    settings = {s["key"]: s["value"] for s in g.db.execute("SELECT key, value FROM settings")}
+    scope_label = f"Barangay {bgy_name}" if bgy_name else "All Barangays"
+    period_label = f"{date_from} to {date_to}" if date_from and date_to else (month if month else "All Time")
+
+    payload = {
+        "period_label": period_label,
+        "scope_label": scope_label,
+        "barangay_label": scope_label if bgy_name else None,
+        "province": settings.get("province", ""),
+        "municipality": settings.get("municipality", ""),
+        "generated_at": docgen.format_timestamp(db.now_iso()),
+        "prepared_by": g.user["full_name"],
+        "total_issued": len(rows),
+        "total_active": sum(1 for r in rows if r.get("status") == "active"),
+        "total_reprints": sum(r.get("reprint_count", 0) for r in rows),
+        "total_printed": sum(1 for r in rows if r.get("is_printed")),
+        "rows": rows,
+        "by_barangay": [{"name": k, "count": v} for k, v in sorted(by_bgy.items(), key=lambda x: -x[1])],
+        "by_fca": [{"name": k, "count": v} for k, v in sorted(by_fca.items(), key=lambda x: -x[1])],
+    }
+    return payload, None
+
+
+@app.get("/api/reports/farmer-ids")
+@login_required
+def report_farmer_ids():
+    payload, err = _report_farmer_ids_payload()
+    if err:
+        return err
+    _audit("report.generate", f"Farmer IDs report ({payload['scope_label']}) previewed")
+    g.db.commit()
+    return jsonify(payload)
+
+
+@app.get("/api/reports/farmer-ids/pdf")
+@login_required
+def report_farmer_ids_pdf():
+    payload, err = _report_farmer_ids_payload()
+    if err:
+        return err
+    import reports as _reports
+    try:
+        pdf_path = _reports.generate_farmer_ids_pdf(payload)
+    except Exception as exc:  # noqa: BLE001
+        return _err(f"Report generation failed: {exc}", 500)
+    _audit("report.generate", f"Farmer's ID report ({payload['scope_label']}) downloaded as PDF")
+    g.db.commit()
+    stamp = datetime.datetime.now().strftime("%Y%m%d")
+    resp = send_file(pdf_path, as_attachment=True, download_name=f"farmer_ids_report_{stamp}.pdf")
+    resp.call_on_close(lambda: _reports.cleanup_pdf(pdf_path))
+    return resp
+
+
+@app.get("/api/reports/farmer-ids/csv")
+@login_required
+def report_farmer_ids_csv():
+    payload, err = _report_farmer_ids_payload()
+    if err:
+        return err
+    import csv as _csv
+    buf = io.StringIO()
+    writer = _csv.writer(buf)
+    writer.writerow(["#", "Control No", "Farmer Name", "RSBSA Number", "Gender", "Barangay", "Address", "FCA", "Issued Date", "Valid Until", "Printed?", "Reprint Count"])
+    for idx, r in enumerate(payload["rows"], start=1):
+        writer.writerow([
+            idx,
+            r.get("control_no") or "",
+            r.get("name") or "",
+            r.get("rsbsa_number") or "",
+            r.get("gender") or "",
+            r.get("barangay") or "",
+            r.get("address") or "",
+            r.get("affiliated_fca") or "",
+            r.get("issued_at") or "",
+            r.get("valid_until") or "",
+            "YES" if r.get("is_printed") else "NO",
+            r.get("reprint_count", 0),
+        ])
+    stamp = datetime.datetime.now().strftime("%Y%m%d")
+    _audit("report.generate", f"Farmer's ID report ({payload['scope_label']}) downloaded as CSV")
+    g.db.commit()
+    return Response(
+        buf.getvalue(),
+        mimetype="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="farmer_ids_report_{stamp}.csv"'}
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Audit trail
 # --------------------------------------------------------------------------- #
@@ -3136,12 +4045,13 @@ def admin_create_user():
     if g.db.execute("SELECT 1 FROM users WHERE LOWER(username) = LOWER(?)",
                     (username,)).fetchone():
         return _err("That username is already taken.", 409)
+    must_change = 1 if role == "secretary" else 0
     try:
         cur = g.db.execute(
             "INSERT INTO users (username, password_hash, full_name, role, "
-            "barangay_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            "barangay_id, must_change_password, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (username, generate_password_hash(password), full_name, role,
-             barangay_id if role == "secretary" else None, db.now_iso()),
+             barangay_id if role == "secretary" else None, must_change, db.now_iso()),
         )
     except Exception:  # noqa: BLE001
         return _err("That username is already taken.", 409)
@@ -3168,7 +4078,7 @@ def admin_update_user(uid):
     if body.get("password"):
         if len(body["password"]) < 6:
             return _err("Password must be at least 6 characters.")
-        g.db.execute("UPDATE users SET password_hash=? WHERE id=?",
+        g.db.execute("UPDATE users SET password_hash=?, must_change_password=1 WHERE id=?",
                      (generate_password_hash(body["password"]), uid))
         _audit("user.password_reset", f"Password reset for '{user['username']}'")
     if body.get("barangay_id") and user["role"] == "secretary":
@@ -3247,25 +4157,52 @@ def admin_update_template(tid):
                      (body["name"].strip(), tid))
     if isinstance(body.get("fields"), list):
         fields = []
+        valid_types = ("text", "textarea", "number", "date", "select", "radio", "checkbox")
         for f in body["fields"]:
             if not f.get("key"):
                 continue
+            clean_key = re.sub(r"[^A-Za-z0-9_]", "", (f["key"] or "").strip().upper())
+            if not clean_key:
+                continue
+            raw_type = f.get("type") or "text"
+            ftype = raw_type if raw_type in valid_types else "text"
+            opts = f.get("options") or []
+            if isinstance(opts, str):
+                opts = [o.strip() for o in opts.split(",") if o.strip()]
             fields.append({
-                "key": f["key"],
-                "label": (f.get("label") or f["key"]).strip(),
-                "type": f.get("type") if f.get("type") in
-                        ("text", "textarea", "number", "date") else "text",
+                "key": clean_key,
+                "label": (f.get("label") or clean_key).strip(),
+                "type": ftype,
                 "required": bool(f.get("required")),
                 "system": bool(f.get("system")),
                 "help": (f.get("help") or "").strip(),
+                "placeholder": (f.get("placeholder") or "").strip(),
+                "default_value": (f.get("default_value") or "").strip(),
+                "options": opts,
             })
         if not fields:
             return _err("Field list cannot be empty.")
         g.db.execute("UPDATE templates SET fields_json=? WHERE id=?",
                      (json.dumps(fields), tid))
-        _audit("template.fields", f"Field settings updated for '{tpl['name']}'")
+        _audit("template.fields", f"Dynamic schema updated for '{tpl['name']}' ({len(fields)} fields)")
     g.db.commit()
     return jsonify(ok=True)
+
+
+@app.post("/api/admin/templates/<int:tid>/detect-docx")
+@admin_required
+def admin_template_detect_docx(tid):
+    tpl = _load_template(tid)
+    if tpl is None:
+        return _err("Not found.", 404)
+    path = os.path.join(db.TEMPLATES_DIR, tpl["filename"])
+    if not os.path.exists(path):
+        return _err("Template Word file not found on disk.", 404)
+    try:
+        fields = docgen.build_fields_config(path)
+    except Exception as exc:  # noqa: BLE001
+        return _err(f"Could not read template: {exc}", 400)
+    return jsonify(fields=fields)
 
 
 @app.get("/api/admin/settings")
@@ -3277,6 +4214,16 @@ def get_settings():
         "municipality": vals.get("municipality", ""),
         "province": vals.get("province", ""),
         "cert_prefix": vals.get("cert_prefix", "RSBSA"),
+    })
+
+
+@app.get("/api/office-info")
+def get_office_info():
+    vals = {r["key"]: r["value"] for r in
+            g.db.execute("SELECT key, value FROM settings")}
+    return jsonify({
+        "municipality": vals.get("municipality", ""),
+        "province": vals.get("province", ""),
     })
 
 

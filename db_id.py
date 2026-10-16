@@ -81,12 +81,16 @@ def init_db() -> None:
         if "affiliated_fca" not in columns:
             conn.execute(
                 "ALTER TABLE id_persons ADD COLUMN affiliated_fca TEXT")
-        # The ID database no longer stores barangay fields; Gender replaces
-        # them. Drop the obsolete columns from databases created earlier.
-        for obsolete in ("barangay_id", "barangay_name"):
-            if obsolete in columns:
-                conn.execute(
-                    f"ALTER TABLE id_persons DROP COLUMN {obsolete}")
+        if "barangay" not in columns:
+            conn.execute("ALTER TABLE id_persons ADD COLUMN barangay TEXT")
+        if "remarks" not in columns:
+            conn.execute("ALTER TABLE id_persons ADD COLUMN remarks TEXT NOT NULL DEFAULT 'Active'")
+        card_cols = {row[1] for row in
+                     conn.execute("PRAGMA table_info(id_cards)")}
+        if "is_printed" not in card_cols:
+            conn.execute("ALTER TABLE id_cards ADD COLUMN is_printed INTEGER NOT NULL DEFAULT 0")
+        if "printed_at" not in card_cols:
+            conn.execute("ALTER TABLE id_cards ADD COLUMN printed_at TEXT")
         conn.commit()
     finally:
         conn.close()

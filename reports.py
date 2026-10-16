@@ -171,3 +171,113 @@ def _build_docx(path: str, p: dict) -> None:
     line("Municipal Agriculturist / Office Head")
 
     doc.save(path)
+
+
+def generate_farmer_ids_pdf(payload: dict) -> str:
+    """Build the Farmers ID report DOCX in a temp dir, convert to PDF, return PDF path.
+
+    The caller must call cleanup_pdf() when the file has been sent.
+    """
+    tmpdir = tempfile.mkdtemp(prefix="rsbsa_id_report_")
+    try:
+        docx_path = os.path.join(tmpdir, "farmer_ids_report.docx")
+        _build_farmer_ids_docx(docx_path, payload)
+        return docx_to_pdf(docx_path, tmpdir)
+    except Exception:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise
+
+
+def _build_farmer_ids_docx(path: str, p: dict) -> None:
+    doc = Document()
+
+    def center(text, bold=False, size=None, italic=False):
+        para = doc.add_paragraph()
+        para.alignment = 1
+        run = para.add_run(text)
+        run.bold = bold
+        run.italic = italic
+        if size:
+            run.font.size = Pt(size)
+        return para
+
+    def line(text, bold=False, size=None):
+        para = doc.add_paragraph()
+        run = para.add_run(text)
+        run.bold = bold
+        if size:
+            run.font.size = Pt(size)
+        return para
+
+    # ---------------- header ----------------
+    if p.get("province"):
+        center(f"PROVINCE OF {p['province'].upper()}", size=11)
+    if p.get("municipality"):
+        center(p["municipality"].upper(), bold=True, size=12)
+    center("FARMER'S ID GENERATION & ISSUANCE REPORT", bold=True, size=14)
+    center("Registry System for Basic Sectors in Agriculture (RSBSA) — Farmer ID Management",
+           size=10, italic=True)
+    doc.add_paragraph()
+
+    line(f"Period: {p.get('period_label', 'All Time')}", bold=True)
+    line(f"Scope: {p.get('scope_label', 'All Barangays')}")
+    line(f"Generated: {p['generated_at']} by {p['prepared_by']} (system-generated)")
+    doc.add_paragraph()
+
+    # ---------------- summary KPIs ----------------
+    line("I. SUMMARY STATISTICS", bold=True)
+    t = doc.add_table(rows=1, cols=4)
+    t.style = "Table Grid"
+    hdr = t.rows[0].cells
+    hdr[0].text = "Total IDs Issued"
+    hdr[1].text = "Active IDs"
+    hdr[2].text = "Regenerated"
+    hdr[3].text = "Tagged Printed"
+    for c in hdr:
+        for para in c.paragraphs:
+            for run in para.runs:
+                run.bold = True
+    row = t.add_row().cells
+    row[0].text = str(p.get("total_issued", 0))
+    row[1].text = str(p.get("total_active", 0))
+    row[2].text = str(p.get("total_reprints", 0))
+    row[3].text = str(p.get("total_printed", 0))
+    doc.add_paragraph()
+
+    # ---------------- detail list ----------------
+    line("II. DETAIL OF GENERATED FARMER'S IDS", bold=True)
+    if p.get("rows"):
+        t2 = doc.add_table(rows=1, cols=7)
+        t2.style = "Table Grid"
+        hdr2 = t2.rows[0].cells
+        for i, h in enumerate(["#", "Control No.", "Farmer Name", "RSBSA No.",
+                               "Barangay / Address", "Date Issued", "Printed?"]):
+            hdr2[i].text = h
+            for para in hdr2[i].paragraphs:
+                for run in para.runs:
+                    run.bold = True
+        for i, r in enumerate(p["rows"], start=1):
+            row = t2.add_row().cells
+            row[0].text = str(i)
+            row[1].text = str(r.get("control_no") or "—")
+            row[2].text = str(r.get("name") or "—")
+            row[3].text = str(r.get("rsbsa_number") or "—")
+            row[4].text = str(r.get("barangay") or r.get("address") or "—")
+            row[5].text = str(r.get("issued_at") or "—")
+            row[6].text = "YES" if r.get("is_printed") else "NO"
+    else:
+        line("No farmer IDs recorded for this period.", italic=True)
+
+    # ---------------- signatures ----------------
+    doc.add_paragraph()
+    doc.add_paragraph()
+    center(f"Prepared by: {p['prepared_by']}", bold=True)
+    center("Agriculture Staff / Certifying Officer")
+    doc.add_paragraph()
+    line("Noted by:")
+    doc.add_paragraph()
+    line("____________________________________")
+    line("Municipal Agriculturist")
+
+    doc.save(path)
+

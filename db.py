@@ -155,6 +155,24 @@ _FARMER_ID_COLUMNS = (
     ("affiliated_fca", "TEXT"),
 )
 
+_FARMER_REMARKS_COLUMNS = (
+    ("remarks", "TEXT NOT NULL DEFAULT 'Active'"),
+    ("pending_remarks", "TEXT"),
+    ("pending_remarks_by", "INTEGER"),
+    ("pending_remarks_at", "TEXT"),
+    ("gender", "TEXT"),
+)
+
+_USER_EXTRA_COLUMNS = (
+    ("must_change_password", "INTEGER NOT NULL DEFAULT 0"),
+    ("last_active_at", "TEXT"),
+)
+
+_FARMER_ID_EXTRA_COLUMNS = (
+    ("is_printed", "INTEGER NOT NULL DEFAULT 0"),
+    ("printed_at", "TEXT"),
+)
+
 # PDF-retention bookkeeping. Database records are NEVER deleted; only the
 # PDF file is removed 30 days after pdf_file_created_at. Regenerating a PDF
 # refreshes pdf_file_created_at (a fresh 30 days) without touching the
@@ -232,6 +250,27 @@ def init_db() -> None:
     for col, decl in _FARMER_ID_COLUMNS:
         if col not in farmer_cols:
             conn.execute(f"ALTER TABLE farmers ADD COLUMN {col} {decl}")
+    for col, decl in _FARMER_REMARKS_COLUMNS:
+        if col not in farmer_cols:
+            conn.execute(f"ALTER TABLE farmers ADD COLUMN {col} {decl}")
+    user_cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
+    for col, decl in _USER_EXTRA_COLUMNS:
+        if col not in user_cols:
+            conn.execute(f"ALTER TABLE users ADD COLUMN {col} {decl}")
+    fid_cols = {r["name"] for r in conn.execute("PRAGMA table_info(farmer_ids)")}
+    for col, decl in _FARMER_ID_EXTRA_COLUMNS:
+        if col not in fid_cols:
+            conn.execute(f"ALTER TABLE farmer_ids ADD COLUMN {col} {decl}")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS messages ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "sender_id INTEGER NOT NULL REFERENCES users (id), "
+        "recipient_id INTEGER REFERENCES users (id), "
+        "message TEXT NOT NULL, "
+        "sent_at TEXT NOT NULL, "
+        "read_at TEXT, "
+        "is_broadcast INTEGER NOT NULL DEFAULT 0)"
+    )
     if not _had_vstatus:
         # Pre-existing masterlist records count as already checked.
         conn.execute(

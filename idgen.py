@@ -262,11 +262,15 @@ def render_front(farmer: dict, control_no: str, valid_until: str,
         rsbsa_size -= 1
     d.text((x + S(20), S(370)), rsbsa_t, font=F(rsbsa_size, weight="mono"),
            fill=DESIGN["green"])
-    if "gender" in farmer:
-        _field(d, x, S(438), "Gender", farmer.get("gender"), vsize=24)
+    gender_val = str(farmer.get("gender") or "").strip().upper()
+    bgy_val = str(farmer.get("barangay") or "").strip()
+    if gender_val:
+        _field(d, x, S(438), "Gender", gender_val, vsize=24)
+    elif bgy_val:
+        _field(d, x, S(438), "Barangay", bgy_val, vsize=24)
     else:
-        _field(d, x, S(438), "Barangay", farmer.get("barangay"), vsize=24)
-    _field(d, x + S(306), S(438), "Birthdate", farmer.get("birthdate"),
+        _field(d, x, S(438), "Gender", "—", vsize=24)
+    _field(d, x + S(306), S(438), "Birthdate", farmer.get("birthdate") or "—",
            vsize=24)
     _field(d, x, S(516), "Civil Status", farmer.get("civil_status"),
            vsize=24)
@@ -388,3 +392,79 @@ def png_bytes(img: Image.Image) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="PNG", dpi=(DPI, DPI), optimize=True)
     return buf.getvalue()
+
+
+def batch_a4_pdf(card_items: list) -> bytes:
+    """Render a batch of ID cards on A4 paper (210 x 297 mm at 300 dpi).
+
+    Each A4 page is optimized for 5 Farmers' IDs (Front and Back side-by-side):
+      * Column 1: Front of IDs 1 to 5
+      * Column 2: Back of IDs 1 to 5
+    Includes clear cutting guide lines for cutting and lamination.
+    card_items: list of dicts with 'front' (Image), 'back' (Image), and optional 'label' (str).
+    """
+    if not card_items:
+        raise ValueError("No card items provided for batch print.")
+
+    a4_w, a4_h = 2480, 3508
+    target_card_w, target_card_h = 1011, 638
+    col_gap = 156
+    margin_x = (a4_w - (target_card_w * 2 + col_gap)) // 2  # 151
+    row_gap = 28
+    margin_y = (a4_h - (target_card_h * 5 + row_gap * 4)) // 2  # 103
+
+    pages = []
+    # Process in chunks of 5
+    for chunk_idx in range(0, len(card_items), 5):
+        chunk = card_items[chunk_idx:chunk_idx + 5]
+        page = Image.new("RGB", (a4_w, a4_h), (255, 255, 255))
+        d = ImageDraw.Draw(page)
+
+        for row_idx, item in enumerate(chunk):
+            y = margin_y + row_idx * (target_card_h + row_gap)
+            front_x = margin_x
+            back_x = margin_x + target_card_w + col_gap
+
+            f_img = item["front"]
+            b_img = item["back"]
+
+            if f_img.size != (target_card_w, target_card_h):
+                f_resized = f_img.resize((target_card_w, target_card_h), Image.Resampling.LANCZOS)
+            else:
+                f_resized = f_img
+
+            if b_img.size != (target_card_w, target_card_h):
+                b_resized = b_img.resize((target_card_w, target_card_h), Image.Resampling.LANCZOS)
+            else:
+                b_resized = b_img
+
+            page.paste(f_resized, (front_x, y))
+            page.paste(b_resized, (back_x, y))
+
+            # Draw precise cutting guide lines around front and back cards
+            guide_color = (210, 212, 206)
+            d.rectangle([front_x - 1, y - 1, front_x + target_card_w, y + target_card_h],
+                        outline=guide_color, width=1)
+            d.rectangle([back_x - 1, y - 1, back_x + target_card_w, y + target_card_h],
+                        outline=guide_color, width=1)
+
+            # Draw subtle tick marks in the margin
+            d.line([front_x - 12, y - 1, front_x - 2, y - 1], fill=guide_color, width=1)
+            d.line([front_x - 12, y + target_card_h, front_x - 2, y + target_card_h], fill=guide_color, width=1)
+            d.line([back_x + target_card_w + 2, y - 1, back_x + target_card_w + 12, y - 1], fill=guide_color, width=1)
+            d.line([back_x + target_card_w + 2, y + target_card_h, back_x + target_card_w + 12, y + target_card_h], fill=guide_color, width=1)
+
+            # Label on outer margin
+            label = item.get("label") or f"Farmer ID #{chunk_idx + row_idx + 1}"
+            d.text((front_x, y - 16), f"FRONT  ·  {label}", font=F(11, weight="med"), fill=(140, 145, 140))
+            d.text((back_x, y - 16), f"BACK  ·  {label}", font=F(11, weight="med"), fill=(140, 145, 140))
+
+        pages.append(page)
+
+    buf = io.BytesIO()
+    first_page = pages[0]
+    other_pages = pages[1:]
+    first_page.save(buf, format="PDF", save_all=True, append_images=other_pages,
+                    resolution=300.0, quality=95)
+    return buf.getvalue()
+
