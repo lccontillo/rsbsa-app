@@ -804,9 +804,20 @@ async function openMessengerModal() {
           }
           const mRes = await api(url);
           const msgs = Array.isArray(mRes) ? mRes : (mRes.messages || []);
-          const unreadIds = msgs.filter((m) => m.recipient_id === ME.id && !m.read_at).map((m) => m.id);
-          if (unreadIds.length) {
-            api("/api/messages/mark-read", { method: "POST", body: { message_ids: unreadIds } }).catch(() => {});
+          const unreadIds = msgs.filter((m) => m.recipient_id === ME.id).map((m) => m.id);
+          if (unreadIds.length || !isAdmin) {
+            api("/api/messages/mark-read", {
+              method: "POST",
+              body: { message_ids: unreadIds, partner_id: isAdmin ? activeSecId : (mRes.partner_id || null) }
+            }).then(() => {
+              api("/api/messages/unread-count").then(({ unread }) => {
+                const b = document.getElementById("msg-badge");
+                if (b) {
+                  if (unread > 0) { b.textContent = unread; b.style.display = "inline-block"; }
+                  else { b.style.display = "none"; }
+                }
+              }).catch(() => {});
+            }).catch(() => {});
           }
 
           let secSelector = "";
@@ -878,6 +889,16 @@ async function openMessengerModal() {
         try {
           const bRes = await api("/api/messages?broadcast_only=1");
           const msgs = Array.isArray(bRes) ? bRes : (bRes.messages || []);
+          api("/api/messages/mark-read", { method: "POST", body: { is_broadcast: true } })
+            .then(() => {
+              api("/api/messages/unread-count").then(({ unread }) => {
+                const b = document.getElementById("msg-badge");
+                if (b) {
+                  if (unread > 0) { b.textContent = unread; b.style.display = "inline-block"; }
+                  else { b.style.display = "none"; }
+                }
+              }).catch(() => {});
+            }).catch(() => {});
           bodyEl.innerHTML = `
             ${isAdmin ? `
               <form id="bc-send-form" style="display:flex;gap:8px;margin-bottom:14px">

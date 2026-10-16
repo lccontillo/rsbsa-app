@@ -271,6 +271,13 @@ def init_db() -> None:
         "read_at TEXT, "
         "is_broadcast INTEGER NOT NULL DEFAULT 0)"
     )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS message_reads ("
+        "message_id INTEGER NOT NULL REFERENCES messages (id) ON DELETE CASCADE, "
+        "user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE, "
+        "read_at TEXT NOT NULL, "
+        "PRIMARY KEY (message_id, user_id))"
+    )
     if not _had_vstatus:
         # Pre-existing masterlist records count as already checked.
         conn.execute(

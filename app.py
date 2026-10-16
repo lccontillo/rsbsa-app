@@ -902,46 +902,94 @@ def mark_messages_read():
     partner_id = body.get("partner_id")
     is_broadcast = bool(body.get("is_broadcast", False))
     now = db.now_iso()
+    uid = g.user["id"]
+
     if isinstance(message_ids, list) and message_ids:
-        placeholders = ",".join("?" for _ in message_ids)
-        g.db.execute(
-            f"UPDATE messages SET read_at = ? WHERE id IN ({placeholders}) AND read_at IS NULL",
-            [now] + message_ids
-        )
+        for mid in message_ids:
+            try:
+                mid_int = int(mid)
+                g.db.execute(
+                    "INSERT OR IGNORE INTO message_reads (message_id, user_id, read_at) VALUES (?, ?, ?)",
+                    (mid_int, uid, now)
+                )
+                # Also set legacy read_at if direct recipient
+                g.db.execute(
+                    "UPDATE messages SET read_at = ? WHERE id = ? AND recipient_id = ? AND read_at IS NULL",
+                    (now, mid_int, uid)
+                )
+            except (ValueError, TypeError):
+                pass
     elif is_broadcast:
-        g.db.execute(
-            "UPDATE messages SET read_at = ? WHERE is_broadcast = 1 AND sender_id != ? AND read_at IS NULL",
-            (now, g.user["id"])
-        )
+        # Mark all broadcast announcements as read for this user
+        bc_rows = g.db.execute("SELECT id FROM messages WHERE is_broadcast = 1 AND sender_id != ?", (uid,)).fetchall()
+        for r in bc_rows:
+            g.db.execute(
+                "INSERT OR IGNORE INTO message_reads (message_id, user_id, read_at) VALUES (?, ?, ?)",
+                (r["id"], uid, now)
+            )
     elif partner_id:
+        partner_msgs = g.db.execute(
+            "SELECT id FROM messages WHERE sender_id = ? AND recipient_id = ?",
+            (partner_id, uid)
+        ).fetchall()
+        for r in partner_msgs:
+            g.db.execute(
+                "INSERT OR IGNORE INTO message_reads (message_id, user_id, read_at) VALUES (?, ?, ?)",
+                (r["id"], uid, now)
+            )
         g.db.execute(
             "UPDATE messages SET read_at = ? WHERE sender_id = ? AND recipient_id = ? AND read_at IS NULL",
-            (now, partner_id, g.user["id"])
+            (now, partner_id, uid)
         )
     else:
+        # Mark all messages addressed to or broadcast to this user
+        all_msgs = g.db.execute(
+            "SELECT id FROM messages WHERE (recipient_id = ? OR (is_broadcast = 1 AND sender_id != ?))",
+            (uid, uid)
+        ).fetchall()
+        for r in all_msgs:
+            g.db.execute(
+                "INSERT OR IGNORE INTO message_reads (message_id, user_id, read_at) VALUES (?, ?, ?)",
+                (r["id"], uid, now)
+            )
         g.db.execute(
-            "UPDATE messages SET read_at = ? WHERE (recipient_id = ? OR (is_broadcast = 1 AND sender_id != ?)) AND read_at IS NULL",
-            (now, g.user["id"], g.user["id"])
+            "UPDATE messages SET read_at = ? WHERE recipient_id = ? AND read_at IS NULL",
+            (now, uid)
         )
+
     g.db.commit()
     _ws_broadcast({
         "type": "messages_read",
-        "user_id": g.user["id"],
+        "user_id": uid,
         "partner_id": partner_id
-    }, target_user_ids=({g.user["id"], int(partner_id)} if partner_id else None))
+    }, target_user_ids=({uid, int(partner_id)} if partner_id else None))
     return jsonify(ok=True)
 
 
 @app.get("/api/messages/unread-count")
 @login_required
 def unread_messages_count():
-    cnt = g.db.execute(
-        "SELECT COUNT(*) FROM messages "
-        "WHERE (recipient_id = ? OR (is_broadcast = 1 AND sender_id != ?)) "
-        "AND read_at IS NULL",
-        (g.user["id"], g.user["id"])
+    uid = g.user["id"]
+    # Direct messages sent to user that have not been read (checked via message_reads or read_at)
+    direct_unread = g.db.execute(
+        "SELECT COUNT(*) FROM messages m "
+        "LEFT JOIN message_reads mr ON mr.message_id = m.id AND mr.user_id = ? "
+        "WHERE m.recipient_id = ? AND m.is_broadcast = 0 "
+        "AND mr.read_at IS NULL AND m.read_at IS NULL",
+        (uid, uid)
     ).fetchone()[0]
-    return jsonify(unread=cnt)
+
+    # Broadcast announcements sent by someone else that this user has not read yet
+    broadcast_unread = g.db.execute(
+        "SELECT COUNT(*) FROM messages m "
+        "LEFT JOIN message_reads mr ON mr.message_id = m.id AND mr.user_id = ? "
+        "WHERE m.is_broadcast = 1 AND m.sender_id != ? "
+        "AND mr.read_at IS NULL",
+        (uid, uid)
+    ).fetchone()[0]
+
+    cnt = direct_unread + broadcast_unread
+    return jsonify(unread=cnt, direct_unread=direct_unread, broadcast_unread=broadcast_unread)
 
 
 # --------------------------------------------------------------------------- #
