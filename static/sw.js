@@ -6,12 +6,12 @@
  * - Non-GET requests are never handled here: the app itself queues them in
  *   its offline outbox (see app.js) and syncs when the connection returns.
  */
-const SHELL_CACHE = "rsbsa-shell-v9";
+const SHELL_CACHE = "rsbsa-shell-v10";
 const API_CACHE = "rsbsa-api-v1";
 const SHELL = [
   "/",
   "/static/style.css",
-  "/static/app.js?v=20261016_4",
+  "/static/app.js?v=20261016_5",
   "/static/office-logo.png",
   "/static/jsQR.js",
   "/static/manifest.webmanifest",

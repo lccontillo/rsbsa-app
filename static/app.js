@@ -2474,6 +2474,7 @@ async function viewReview(id) {
       info ? info.fields.filter((f) => !f.system) : farmerFields
     );
     const rows = efields.map((f) => {
+      let input = "";
       const rawVal = (f.key === "PARCEL_LOCATION" && !entry[f.key] && defaultParcelLoc)
         ? defaultParcelLoc
         : (entry[f.key] || "");
@@ -3531,8 +3532,14 @@ async function viewIdGenerator() {
           <h3 style="margin:0">ID Database Records</h3>
           <span class="small muted" id="idg-record-summary">Loading records…</span>
         </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <button class="btn btn-primary" id="idg-batch-print" type="button">🖨 Batch Print A4 (5 IDs/sheet)</button>
+          <div id="idg-batch-actions-grp" style="display:none;gap:6px;align-items:center">
+            <button class="btn btn-sm" id="idg-batch-tag-printed" type="button" title="Mark selected cards as Printed">✓ Tag Printed</button>
+            <button class="btn btn-sm" id="idg-batch-untag-printed" type="button" title="Mark selected cards as Not Printed">Untag Printed</button>
+            ${ME.role === "admin" ? `<button class="btn btn-sm btn-danger" id="idg-batch-delete" type="button" title="Delete selected ID records">🗑 Batch Delete</button>` : ""}
+            <button class="btn btn-sm" id="idg-batch-clear" type="button" title="Clear selected items" style="color:#666">✕ Clear</button>
+          </div>
           <button class="btn" id="idg-copy">Copy from Farmer Masterlist</button>
           <button class="btn" id="idg-manage-fcas" type="button">🌾 Manage Affiliated FCAs</button>
         </div>
@@ -3576,13 +3583,16 @@ async function viewIdGenerator() {
 
   function updateBatchButtonText() {
     const btn = document.getElementById("idg-batch-print");
+    const grp = document.getElementById("idg-batch-actions-grp");
     if (!btn) return;
     if (idgSelectedIds.size > 0) {
       btn.textContent = `🖨 Batch Print A4 (${idgSelectedIds.size} selected)`;
       btn.classList.add("btn-success");
+      if (grp) grp.style.display = "inline-flex";
     } else {
       btn.textContent = "🖨 Batch Print A4 (5 IDs/sheet)";
       btn.classList.remove("btn-success");
+      if (grp) grp.style.display = "none";
     }
   }
 
@@ -3817,6 +3827,63 @@ async function viewIdGenerator() {
       btn.disabled = false;
       updateBatchButtonText();
     }
+  });
+
+  bind("idg-batch-tag-printed", "click", async () => {
+    const checked = Array.from(idgSelectedIds);
+    if (!checked.length) return;
+    try {
+      await Promise.all(checked.map((pid) =>
+        api(`/api/id-generator/cards/${pid}/tag-printed`, { method: "POST", body: { is_printed: true } }).catch(() => {})
+      ));
+      toast(`Tagged ${checked.length} selected farmer(s) as Printed.`);
+      idgSelectedIds.clear();
+      await loadPersons();
+    } catch (err) {
+      toast(err.message, "err");
+    }
+  });
+
+  bind("idg-batch-untag-printed", "click", async () => {
+    const checked = Array.from(idgSelectedIds);
+    if (!checked.length) return;
+    try {
+      await Promise.all(checked.map((pid) =>
+        api(`/api/id-generator/cards/${pid}/tag-printed`, { method: "POST", body: { is_printed: false } }).catch(() => {})
+      ));
+      toast(`Marked ${checked.length} selected farmer(s) as Not Printed.`);
+      idgSelectedIds.clear();
+      await loadPersons();
+    } catch (err) {
+      toast(err.message, "err");
+    }
+  });
+
+  bind("idg-batch-delete", "click", () => {
+    const checked = Array.from(idgSelectedIds);
+    if (!checked.length) return;
+    confirmModal("Batch Delete ID Records",
+      `Are you sure you want to permanently delete <b>${checked.length}</b> selected ID record(s) and their issued cards?`,
+      "Delete Selected", async () => {
+        try {
+          await Promise.all(checked.map((pid) =>
+            api(`/api/id-generator/persons/${pid}`, { method: "DELETE" }).catch(() => {})
+          ));
+          toast(`Deleted ${checked.length} ID record(s).`);
+          idgSelectedIds.clear();
+          await loadPersons();
+        } catch (err) {
+          toast(err.message, "err");
+        }
+      }, true);
+  });
+
+  bind("idg-batch-clear", "click", () => {
+    idgSelectedIds.clear();
+    resultsBox.querySelectorAll(".idg-card-check").forEach((chk) => (chk.checked = false));
+    const chkAll = document.getElementById("idg-check-all");
+    if (chkAll) chkAll.checked = false;
+    updateBatchButtonText();
   });
 
   await loadPersons();
