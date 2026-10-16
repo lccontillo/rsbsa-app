@@ -6,6 +6,11 @@ const $navLinks = document.getElementById("nav-links");
 const $navUser = document.getElementById("nav-user");
 const $modalRoot = document.getElementById("modal-root");
 const $toastWrap = document.getElementById("toast-wrap");
+const $sidebar = document.getElementById("sidebar");
+const $sidebarNav = document.getElementById("sidebar-nav");
+const $sidebarToggle = document.getElementById("sidebar-toggle");
+const $sidebarClose = document.getElementById("sidebar-close");
+const $sidebarBackdrop = document.getElementById("sidebar-backdrop");
 
 let ME = null;
 let NEEDS_SETUP = false;
@@ -568,11 +573,12 @@ const ACTION_LABELS = {
 async function fetchOfficeInfo() {
   try {
     const s = await api("/api/office-info");
+    const parts = [s.municipality, s.province].filter(Boolean);
+    const txt = parts.join(", ");
     const el = document.getElementById("brand-location");
-    if (el) {
-      const parts = [s.municipality, s.province].filter(Boolean);
-      el.textContent = parts.join(", ");
-    }
+    if (el) el.textContent = txt;
+    const elSide = document.getElementById("sidebar-location");
+    if (elSide) elSide.textContent = txt;
   } catch (_) {}
 }
 
@@ -847,19 +853,150 @@ async function openMessengerModal() {
 }
 
 /* ============================== navigation ============================ */
+const SIDEBAR_COLLAPSED_KEY = "rsbsa_sidebar_collapsed_v1";
+
+function setupSidebarEvents() {
+  if (setupSidebarEvents._initialized) return;
+  setupSidebarEvents._initialized = true;
+
+  if (localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1" && window.innerWidth > 992) {
+    document.body.classList.add("sidebar-collapsed");
+  }
+
+  if ($sidebarToggle) {
+    $sidebarToggle.addEventListener("click", () => {
+      if (window.innerWidth <= 992) {
+        document.body.classList.toggle("sidebar-open");
+      } else {
+        document.body.classList.toggle("sidebar-collapsed");
+        try {
+          localStorage.setItem(SIDEBAR_COLLAPSED_KEY,
+            document.body.classList.contains("sidebar-collapsed") ? "1" : "0");
+        } catch (_) {}
+      }
+    });
+  }
+
+  if ($sidebarClose) {
+    $sidebarClose.addEventListener("click", () => {
+      document.body.classList.remove("sidebar-open");
+    });
+  }
+
+  if ($sidebarBackdrop) {
+    $sidebarBackdrop.addEventListener("click", () => {
+      document.body.classList.remove("sidebar-open");
+    });
+  }
+}
+
+function updateNavActive() {
+  const h = (location.hash || "#/").slice(1) || "/";
+  document.querySelectorAll(".side-link").forEach((a) => {
+    const href = (a.getAttribute("href") || "").replace(/^#/, "");
+    if (href === h) {
+      a.classList.add("active");
+    } else {
+      a.classList.remove("active");
+    }
+  });
+  document.querySelectorAll(".nav-links a").forEach((a) => {
+    const href = (a.getAttribute("href") || "").replace(/^#/, "");
+    if (href === h) {
+      a.classList.add("active");
+    } else {
+      a.classList.remove("active");
+    }
+  });
+}
+
 function renderNav() {
+  setupSidebarEvents();
   fetchOfficeInfo();
-  const h = (location.hash || "#/").slice(1);
+  const h = (location.hash || "#/").slice(1) || "/";
   const link = (href, label) =>
     `<a href="#${href}" class="${h === href ? "active" : ""}">${label}</a>`;
 
   if (ME) {
-    let links = link("/dashboard", "Dashboard") + link("/archive", "Archive") +
-                link("/farmers", "Farmers") + link("/reports", "Reports") +
-                link("/audit", "Audit Trail");
-    if (ME.role === "admin") links += link("/id-generator", "ID Generator")
-      + link("/admin", "Administration");
-    $navLinks.innerHTML = links;
+    document.body.classList.add("has-user");
+    document.body.classList.remove("not-logged-in");
+
+    const navGroups = [
+      {
+        heading: "MAIN MENU",
+        items: [
+          {
+            href: "/dashboard",
+            label: "Dashboard",
+            icon: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9"></rect><rect x="14" y="3" width="7" height="5"></rect><rect x="14" y="12" width="7" height="9"></rect><rect x="3" y="16" width="7" height="5"></rect></svg>`,
+          },
+          {
+            href: "/archive",
+            label: "Archive",
+            icon: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"></polyline><rect x="1" y="3" width="22" height="5"></rect><line x1="10" y1="12" x2="14" y2="12"></line></svg>`,
+          },
+          {
+            href: "/farmers",
+            label: "Farmers",
+            icon: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>`,
+          },
+          {
+            href: "/reports",
+            label: "Reports",
+            icon: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>`,
+          },
+          {
+            href: "/audit",
+            label: "Audit Trail",
+            icon: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>`,
+          },
+        ],
+      },
+    ];
+
+    if (ME.role === "admin") {
+      navGroups.push({
+        heading: "MANAGEMENT",
+        items: [
+          {
+            href: "/id-generator",
+            label: "ID Generator",
+            icon: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"></rect><line x1="2" y1="10" x2="22" y2="10"></line><circle cx="7" cy="15" r="1.5"></circle><line x1="12" y1="15" x2="18" y2="15"></line></svg>`,
+          },
+          {
+            href: "/admin",
+            label: "Administration",
+            icon: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>`,
+          },
+        ],
+      });
+    }
+
+    let sideHtml = "";
+    for (const group of navGroups) {
+      sideHtml += `<div class="side-nav-heading">${group.heading}</div>`;
+      for (const it of group.items) {
+        const active = h === it.href;
+        sideHtml += `
+          <a href="#${it.href}" class="side-link ${active ? "active" : ""}">
+            <span class="side-link-icon">${it.icon}</span>
+            <span class="side-link-label">${it.label}</span>
+          </a>`;
+      }
+    }
+
+    if ($sidebarNav) {
+      $sidebarNav.innerHTML = sideHtml;
+      $sidebarNav.querySelectorAll(".side-link").forEach((a) => {
+        a.addEventListener("click", () => {
+          if (window.innerWidth <= 992) {
+            document.body.classList.remove("sidebar-open");
+          }
+        });
+      });
+    }
+
+    $navLinks.innerHTML = "";
     $navUser.innerHTML = `
       <div class="who">
         <div class="name">${esc(ME.full_name)}</div>
@@ -889,6 +1026,9 @@ function renderNav() {
       setTimeout(() => changePasswordModal(true), 300);
     }
   } else {
+    document.body.classList.remove("has-user", "sidebar-open", "sidebar-collapsed");
+    document.body.classList.add("not-logged-in");
+    if ($sidebarNav) $sidebarNav.innerHTML = "";
     $navLinks.innerHTML = link("/", "Home") + link("/track", "Track Request");
     $navUser.innerHTML = `<button class="btn-logout" onclick="location.hash='#/login'">LOG IN</button>`;
   }
@@ -898,6 +1038,8 @@ function renderNav() {
 window.addEventListener("hashchange", route);
 
 async function route() {
+  updateNavActive();
+  document.body.classList.remove("sidebar-open");
   const h = (location.hash || "#/").slice(1) || "/";
 
   if (NEEDS_SETUP && h !== "/setup") { location.hash = "#/setup"; return; }

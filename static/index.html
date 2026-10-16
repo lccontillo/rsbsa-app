@@ -10,25 +10,53 @@
   <link rel="apple-touch-icon" href="/static/office-logo.png">
   <link rel="icon" type="image/png" href="/static/office-logo.png">
 </head>
-<body>
+<body class="not-logged-in">
   <header class="topbar">
     <div class="topbar-inner">
-      <a class="brand" href="#/">
-        <img class="logo-img" src="/static/office-logo.png" width="32" height="32" style="width:32px;height:32px;object-fit:contain;border-radius:50%;background:#fff;padding:2px;box-shadow:0 1px 4px rgba(0,0,0,.25);flex:0 0 auto" alt="Office of the Municipal Agriculturist — Alcala, Cagayan official logo">
-        <div style="display:flex;flex-direction:column;line-height:1.15">
-          <span style="font-weight:700">RSBSA Cert Manager</span>
-          <span id="brand-location" style="font-size:0.75rem;opacity:0.85;font-weight:normal"></span>
-        </div>
-      </a>
+      <div class="topbar-left">
+        <button class="sidebar-toggle" id="sidebar-toggle" type="button" aria-label="Toggle navigation menu" title="Toggle side menu">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="3" y1="12" x2="21" y2="12"></line>
+            <line x1="3" y1="6" x2="21" y2="6"></line>
+            <line x1="3" y1="18" x2="21" y2="18"></line>
+          </svg>
+        </button>
+        <a class="brand" href="#/">
+          <img class="logo-img" src="/static/office-logo.png" width="32" height="32" style="width:32px;height:32px;object-fit:contain;border-radius:50%;background:#fff;padding:2px;box-shadow:0 1px 4px rgba(0,0,0,.25);flex:0 0 auto" alt="Office of the Municipal Agriculturist — Alcala, Cagayan official logo">
+          <div style="display:flex;flex-direction:column;line-height:1.15">
+            <span style="font-weight:700">RSBSA Cert Manager</span>
+            <span id="brand-location" style="font-size:0.75rem;opacity:0.85;font-weight:normal"></span>
+          </div>
+        </a>
+      </div>
       <nav class="nav-links" id="nav-links"></nav>
-      <button class="net-pill" id="net-pill" title="Connection and offline sync status">&#x1F7E2; Online</button>
-      <div class="nav-user" id="nav-user"></div>
+      <div class="topbar-right">
+        <button class="net-pill" id="net-pill" title="Connection and offline sync status">&#x1F7E2; Online</button>
+        <div class="nav-user" id="nav-user"></div>
+      </div>
     </div>
   </header>
 
-  <main class="container" id="app">
-    <div class="loading">Loading…</div>
-  </main>
+  <div class="app-layout" id="app-layout">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-head">
+        <span class="sidebar-title">NAVIGATION</span>
+        <button class="sidebar-close" id="sidebar-close" type="button" aria-label="Close menu">✕</button>
+      </div>
+      <nav class="sidebar-nav" id="sidebar-nav"></nav>
+      <div class="sidebar-footer">
+        <div class="sidebar-footer-text" id="sidebar-location">Alcala, Cagayan</div>
+        <div class="sidebar-footer-sub">RSBSA Cert Manager</div>
+      </div>
+    </aside>
+    <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+
+    <div class="main-content-wrapper">
+      <main class="container" id="app">
+        <div class="loading">Loading…</div>
+      </main>
+    </div>
+  </div>
 
   <div id="modal-root"></div>
   <div id="toast-wrap"></div>
