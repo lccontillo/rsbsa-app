@@ -2954,7 +2954,7 @@ def _overlay_id_generator_status(rows):
     try:
         conn = db_id.connect()
         try:
-            cards = {r["rsbsa_key"]: r for r in conn.execute(
+            cards = {r["rsbsa_key"]: dict(r) for r in conn.execute(
                 "SELECT p.rsbsa_key, p.id AS person_id, p.photo_path, c.control_no, "
                 "c.valid_until, c.reprint_count FROM id_persons p "
                 "LEFT JOIN id_cards c ON c.person_id = p.id").fetchall()}
@@ -2965,10 +2965,10 @@ def _overlay_id_generator_status(rows):
     for r in rows:
         info = cards.get(db_id.rsbsa_key(r.get("rsbsa_number") or ""))
         if info:
-            r["id_generator_person_id"] = info["person_id"]
+            r["id_generator_person_id"] = info.get("person_id")
             if not r.get("photo_path") and info.get("photo_path"):
                 r["photo_path"] = info["photo_path"]
-            if info["control_no"]:
+            if info.get("control_no"):
                 r["id_control_no"] = info["control_no"]
                 r["id_valid_until"] = info["valid_until"]
                 r["id_reprints"] = info["reprint_count"]
