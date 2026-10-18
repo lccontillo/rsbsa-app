@@ -3071,11 +3071,11 @@ def _render_id_person_files(person, card):
         try:
             sf = None
             if person.get("source_farmer_id"):
-                sf = g.db.execute("SELECT id, gender, birthdate, data_json FROM farmers WHERE id = ?",
+                sf = g.db.execute("SELECT id, gender, birthdate, barangay_id, data_json FROM farmers WHERE id = ?",
                                   (person["source_farmer_id"],)).fetchone()
             if sf is None and person.get("rsbsa_number"):
                 rkey = db_id.rsbsa_key(person["rsbsa_number"])
-                sf = g.db.execute("SELECT id, gender, birthdate, data_json FROM farmers WHERE rsbsa_key = ?",
+                sf = g.db.execute("SELECT id, gender, birthdate, barangay_id, data_json FROM farmers WHERE rsbsa_key = ?",
                                   (rkey,)).fetchone()
             if sf:
                 if not gender:
@@ -3107,10 +3107,22 @@ def _render_id_person_files(person, card):
                         conn.close()
         except Exception:
             pass
+    bgy_val = (person["barangay"] if "barangay" in pkeys else "") or ""
+    if not bgy_val:
+        if sf and sf["barangay_id"]:
+            brow = g.db.execute("SELECT name FROM barangays WHERE id = ?", (sf["barangay_id"],)).fetchone()
+            if brow:
+                bgy_val = brow["name"]
+        if not bgy_val and person["address"]:
+            for bname in [r["name"] for r in g.db.execute("SELECT name FROM barangays").fetchall()]:
+                if bname.upper() in person["address"].upper():
+                    bgy_val = bname
+                    break
     payload = {
         "name": person["name"], "rsbsa_number": person["rsbsa_number"] or "",
         "civil_status": person["civil_status"] or "",
         "address": person["address"] or "",
+        "barangay": bgy_val,
         "gender": db_id.normalize_gender(gender) if gender else "",
         "birthdate": _fmt_long_date(bdate),
         "blood_type": "",
@@ -3246,6 +3258,52 @@ def admin_delete_fca(fid):
     return jsonify(ok=True)
 
 
+def _sync_missing_id_barangays(conn):
+    """Backfill missing barangay in id_persons from Masterlist farmers table or address."""
+    try:
+        missing = conn.execute(
+            "SELECT id, rsbsa_key, rsbsa_number, address, source_farmer_id FROM id_persons "
+            "WHERE barangay IS NULL OR TRIM(barangay) = ''"
+        ).fetchall()
+        if not missing:
+            return
+
+        bgy_rows = g.db.execute("SELECT id, name FROM barangays").fetchall()
+        bgy_by_id = {r["id"]: r["name"].strip() for r in bgy_rows}
+        bgy_names = [r["name"].strip() for r in bgy_rows]
+
+        updates = []
+        for p in missing:
+            bname = None
+            if p["source_farmer_id"]:
+                frow = g.db.execute("SELECT barangay_id FROM farmers WHERE id = ?", (p["source_farmer_id"],)).fetchone()
+                if frow and frow["barangay_id"] and frow["barangay_id"] in bgy_by_id:
+                    bname = bgy_by_id[frow["barangay_id"]]
+
+            if not bname and (p["rsbsa_key"] or p["rsbsa_number"]):
+                key = p["rsbsa_key"] or db_id.rsbsa_key(p["rsbsa_number"])
+                frow = g.db.execute("SELECT barangay_id FROM farmers WHERE rsbsa_key = ? OR rsbsa_number = ?",
+                                    (key, p["rsbsa_number"])).fetchone()
+                if frow and frow["barangay_id"] and frow["barangay_id"] in bgy_by_id:
+                    bname = bgy_by_id[frow["barangay_id"]]
+
+            if not bname and p["address"]:
+                addr_upper = p["address"].upper()
+                for bn in bgy_names:
+                    if bn.upper() in addr_upper:
+                        bname = bn
+                        break
+
+            if bname:
+                updates.append((bname, p["id"]))
+
+        if updates:
+            conn.executemany("UPDATE id_persons SET barangay = ? WHERE id = ?", updates)
+            conn.commit()
+    except Exception:
+        pass
+
+
 @app.get("/api/id-generator/persons")
 @admin_required
 def idgen_persons():
@@ -3259,6 +3317,7 @@ def idgen_persons():
 
     conn = _id_conn()
     try:
+        _sync_missing_id_barangays(conn)
         where = ["1=1"]
         params = []
         if q:
@@ -3343,6 +3402,10 @@ def idgen_person(pid):
                          (pid,)).fetchone()
         if p is None:
             return _err("ID record not found.", 404)
+        if not (p["barangay"] if "barangay" in p.keys() else ""):
+            _sync_missing_id_barangays(conn)
+            p = conn.execute("SELECT * FROM id_persons WHERE id = ?",
+                             (pid,)).fetchone()
         card = conn.execute("SELECT * FROM id_cards WHERE person_id = ?",
                             (pid,)).fetchone()
         return jsonify(_id_person_payload(p, dict(card) if card else None))
@@ -3409,6 +3472,23 @@ def idgen_person_update(pid):
              remarks,
              db.now_iso(), pid))
         conn.commit()
+
+        if "barangay" in body:
+            b_id = None
+            if barangay:
+                b_row = g.db.execute("SELECT id FROM barangays WHERE UPPER(TRIM(name)) = UPPER(TRIM(?))", (barangay,)).fetchone()
+                if b_row:
+                    b_id = b_row["id"]
+            if p["source_farmer_id"]:
+                g.db.execute("UPDATE farmers SET barangay_id = ? WHERE id = ?", (b_id, p["source_farmer_id"]))
+            g.db.execute("UPDATE farmers SET barangay_id = ? WHERE rsbsa_key = ? OR rsbsa_number = ?", (b_id, new_key, rsbsa_number))
+            g.db.commit()
+
+        if "rsbsa_number" in body:
+            if p["source_farmer_id"]:
+                g.db.execute("UPDATE farmers SET rsbsa_number = ?, rsbsa_key = ? WHERE id = ?", (rsbsa_number, new_key, p["source_farmer_id"]))
+            g.db.commit()
+
         p = conn.execute("SELECT * FROM id_persons WHERE id = ?",
                          (pid,)).fetchone()
         card = conn.execute("SELECT * FROM id_cards WHERE person_id = ?",

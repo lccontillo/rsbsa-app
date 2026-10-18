@@ -4198,8 +4198,23 @@ function idGenPersonModal(p, onDone) {
         <div class="v">${esc(p.gender || "—")}</div></div>
       <div class="meta-item"><div class="k">Birthdate</div>
         <div class="v">${esc(formatMMDDYYYY(p.birthdate) || "—")}</div></div>
-      <div class="meta-item"><div class="k">Barangay</div>
-        <div class="v">${esc(p.barangay || "—")}</div></div>
+      <div class="meta-item">
+        <div class="k">Barangay</div>
+        <div id="fid-bgy-view" style="display:flex;align-items:center;gap:4px">
+          <span class="v" id="fid-bgy-val" style="font-weight:600">${esc(p.barangay || "—")}</span>
+          <button class="btn-action-icon" id="fid-bgy-btn-edit" type="button" title="Edit Barangay" style="padding:2px 5px">
+            ${editSvg}
+          </button>
+        </div>
+        <div id="fid-bgy-edit" style="display:none;align-items:center;gap:5px;margin-top:2px">
+          <input type="text" id="fid-bgy-input" class="caps" list="fid-bgy-datalist" value="${esc(p.barangay || "")}" placeholder="Select or type barangay" style="padding:3px 6px;font-size:13px;width:170px">
+          <datalist id="fid-bgy-datalist"></datalist>
+          <button class="btn btn-sm btn-primary" id="fid-bgy-btn-save" type="button" style="padding:3px 7px;font-size:12px;display:inline-flex;align-items:center;gap:3px">
+            ${saveSvg} <span>Save</span>
+          </button>
+          <button class="btn btn-sm" id="fid-bgy-btn-cancel" type="button" style="padding:3px 7px;font-size:12px">Cancel</button>
+        </div>
+      </div>
     </div>
     <form id="idg-form">
       <div class="field" style="margin-bottom:14px">
@@ -4323,6 +4338,76 @@ function idGenPersonModal(p, onDone) {
       } finally {
         btnSaveRsbsa.disabled = false;
         btnSaveRsbsa.querySelector("span").textContent = "Save";
+      }
+    });
+  }
+
+  // Edit icon interactions beside Barangay
+  const bgyView = document.getElementById("fid-bgy-view");
+  const bgyEdit = document.getElementById("fid-bgy-edit");
+  const btnEditBgy = document.getElementById("fid-bgy-btn-edit");
+  const btnSaveBgy = document.getElementById("fid-bgy-btn-save");
+  const btnCancelBgy = document.getElementById("fid-bgy-btn-cancel");
+  const bgyInput = document.getElementById("fid-bgy-input");
+  const bgyVal = document.getElementById("fid-bgy-val");
+  const bgyDatalist = document.getElementById("fid-bgy-datalist");
+
+  const populateBgyDatalist = (items) => {
+    if (bgyDatalist && Array.isArray(items)) {
+      bgyDatalist.innerHTML = items.map((b) => `<option value="${esc(b.name || b)}"></option>`).join("");
+    }
+  };
+  const bgyList = cachedBarangays();
+  populateBgyDatalist(bgyList);
+  if (!bgyList.length) {
+    (ME.role === "admin" ? api("/api/admin/barangays") : api("/api/barangays"))
+      .then((items) => populateBgyDatalist(items))
+      .catch(() => {});
+  }
+
+  if (btnEditBgy && bgyView && bgyEdit) {
+    btnEditBgy.addEventListener("click", () => {
+      bgyView.style.display = "none";
+      bgyEdit.style.display = "flex";
+      bgyInput.value = p.barangay || "";
+      bgyInput.focus();
+      bgyInput.select();
+    });
+
+    btnCancelBgy.addEventListener("click", () => {
+      bgyEdit.style.display = "none";
+      bgyView.style.display = "flex";
+    });
+
+    bgyInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        btnSaveBgy.click();
+      } else if (e.key === "Escape") {
+        btnCancelBgy.click();
+      }
+    });
+
+    btnSaveBgy.addEventListener("click", async () => {
+      const newBgy = (bgyInput.value || "").trim().toUpperCase();
+      btnSaveBgy.disabled = true;
+      btnSaveBgy.querySelector("span").textContent = "Saving…";
+      try {
+        const updated = await api(`/api/id-generator/persons/${p.id}`, {
+          method: "PUT",
+          body: { barangay: newBgy }
+        });
+        p.barangay = updated.barangay !== undefined ? updated.barangay : newBgy;
+        bgyVal.textContent = p.barangay || "—";
+        bgyEdit.style.display = "none";
+        bgyView.style.display = "flex";
+        toast("Barangay updated successfully!");
+        if (onDone) onDone();
+      } catch (err) {
+        toast(err.message, "err");
+      } finally {
+        btnSaveBgy.disabled = false;
+        btnSaveBgy.querySelector("span").textContent = "Save";
       }
     });
   }
