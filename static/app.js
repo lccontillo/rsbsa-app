@@ -484,6 +484,30 @@ function toast(msg, kind = "ok") {
   setTimeout(() => el.remove(), 4200);
 }
 
+async function copyToClipboard(text, successMsg = "Copied to clipboard!") {
+  if (!text) return false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    toast(successMsg);
+    return true;
+  } catch (err) {
+    toast("Failed to copy to clipboard", "err");
+    return false;
+  }
+}
+
 function fmtDT(iso) {
   if (!iso) return "—";
   try {
@@ -3635,7 +3659,15 @@ async function viewIdGenerator() {
           <tr>
             <td><input type="checkbox" class="idg-card-check" data-pid="${p.id}" ${p.id_control_no ? "" : "disabled"} ${isChecked ? "checked" : ""}></td>
             <td><b>${esc(p.name)}</b></td>
-            <td class="mono">${esc(p.rsbsa_number)}</td>
+            <td class="mono" style="white-space:nowrap">
+              <span>${esc(p.rsbsa_number)}</span>
+              ${p.rsbsa_number ? `<button class="btn-action-icon" data-copy-rsbsa="${esc(p.rsbsa_number)}" title="Copy RSBSA Number" type="button" style="margin-left:5px">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+              </button>` : ""}
+            </td>
             <td>${esc(p.barangay || "—")}</td>
             <td><span class="badge ${p.remarks === 'Active' ? 'approved' : 'neutral'}">${esc(p.remarks || 'Active')}</span></td>
             <td>${esc(p.gender || "—")}</td>
@@ -3692,6 +3724,14 @@ async function viewIdGenerator() {
   // Event Delegation on #idg-results: zero DOM lag, high speed!
   const resultsBox = document.getElementById("idg-results");
   resultsBox.addEventListener("click", async (e) => {
+    // Copy RSBSA Number
+    const btnCopyRsbsa = e.target.closest("[data-copy-rsbsa]");
+    if (btnCopyRsbsa) {
+      e.stopPropagation();
+      await copyToClipboard(btnCopyRsbsa.dataset.copyRsbsa, "RSBSA Number copied!");
+      return;
+    }
+
     // Details & Generate Modal
     const btnIdg = e.target.closest("[data-idg]");
     if (btnIdg) {
@@ -3958,8 +3998,31 @@ function idGenPersonModal(p, onDone) {
         <a class="btn" href="/api/id-generator/persons/${p.id}/id-card/back">⬇ Back PNG</a>
       </div>
     </div>` : `<div id="fid-preview"></div>`;
+  const copySvg = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
+  const editSvg = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>`;
+  const saveSvg = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>`;
+
   showModal(`
-    <h3>🪪 Farmer's ID — ${esc(p.name)}</h3>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+      <div id="fid-header-view" style="display:flex;align-items:center;gap:6px;flex:1;min-width:0">
+        <h3 style="margin:0;display:inline-flex;align-items:center;gap:6px;word-break:break-word">
+          🪪 Farmer's ID — <span id="fid-title-name">${esc(p.name)}</span>
+        </h3>
+        <button class="btn-action-icon" id="fid-btn-edit" type="button" title="Edit Farmer's Name" style="flex-shrink:0">
+          ${editSvg}
+        </button>
+        <button class="btn-action-icon" id="fid-btn-copy" type="button" title="Copy Farmer's Name and RSBSA No." style="flex-shrink:0">
+          ${copySvg}
+        </button>
+      </div>
+      <div id="fid-header-edit" style="display:none;align-items:center;gap:8px;flex:1;min-width:280px">
+        <input type="text" id="fid-name-input" class="caps" value="${esc(p.name)}" placeholder="Farmer's Name" style="flex:1;padding:6px 10px;font-size:15px;font-weight:600">
+        <button class="btn btn-sm btn-primary" id="fid-btn-save" type="button" style="display:inline-flex;align-items:center;gap:4px">
+          ${saveSvg} <span>Save</span>
+        </button>
+        <button class="btn btn-sm" id="fid-btn-cancel-edit" type="button">Cancel</button>
+      </div>
+    </div>
     <p class="page-sub">Check and complete the ID details below. Details are saved to the ID database for one-click regenerations.</p>
     ${hasId ? `<div class="notice">ID <b class="mono">${esc(p.id_control_no)}</b>
       is already generated — valid until ${fmtD(p.id_valid_until)}
@@ -4014,6 +4077,75 @@ function idGenPersonModal(p, onDone) {
       <button class="btn" id="idg-close" type="button">Close</button>
       <button class="btn btn-primary" id="idg-go" type="button">${hasId ? "🖨 Regenerate ID Card" : "🪪 Generate ID Card"}</button>
     </div>`, 800);
+
+  // Edit and Copy icon interactions in Farmer's ID header
+  const headerView = document.getElementById("fid-header-view");
+  const headerEdit = document.getElementById("fid-header-edit");
+  const btnEdit = document.getElementById("fid-btn-edit");
+  const btnCopy = document.getElementById("fid-btn-copy");
+  const btnSave = document.getElementById("fid-btn-save");
+  const btnCancelEdit = document.getElementById("fid-btn-cancel-edit");
+  const nameInput = document.getElementById("fid-name-input");
+  const titleName = document.getElementById("fid-title-name");
+
+  if (btnCopy) {
+    btnCopy.addEventListener("click", () => {
+      const copyTextVal = p.rsbsa_number ? `${p.name} (${p.rsbsa_number})` : p.name;
+      copyToClipboard(copyTextVal, `Copied: ${copyTextVal}`);
+    });
+  }
+
+  if (btnEdit && headerView && headerEdit) {
+    btnEdit.addEventListener("click", () => {
+      headerView.style.display = "none";
+      headerEdit.style.display = "flex";
+      nameInput.value = p.name || "";
+      nameInput.focus();
+      nameInput.select();
+    });
+
+    btnCancelEdit.addEventListener("click", () => {
+      headerEdit.style.display = "none";
+      headerView.style.display = "flex";
+    });
+
+    nameInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        btnSave.click();
+      } else if (e.key === "Escape") {
+        btnCancelEdit.click();
+      }
+    });
+
+    btnSave.addEventListener("click", async () => {
+      const newName = (nameInput.value || "").trim().toUpperCase();
+      if (!newName) {
+        toast("Farmer name cannot be empty.", "err");
+        return;
+      }
+      btnSave.disabled = true;
+      btnSave.querySelector("span").textContent = "Saving…";
+      try {
+        const updated = await api(`/api/id-generator/persons/${p.id}`, {
+          method: "PUT",
+          body: { name: newName }
+        });
+        p.name = updated.name || newName;
+        titleName.textContent = p.name;
+        headerEdit.style.display = "none";
+        headerView.style.display = "flex";
+        toast("Farmer data updated successfully!");
+        if (onDone) onDone();
+      } catch (err) {
+        toast(err.message, "err");
+      } finally {
+        btnSave.disabled = false;
+        btnSave.querySelector("span").textContent = "Save";
+      }
+    });
+  }
+
   bind("idg-close", "click", closeModal);
   fetchFcaNames().then((names) => {
     const dl = document.getElementById("idg-fca-datalist");

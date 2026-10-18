@@ -3318,33 +3318,46 @@ def idgen_person_update(pid):
                          (pid,)).fetchone()
         if p is None:
             return _err("ID record not found.", 404)
+        name = (body.get("name") or "").strip().upper() if "name" in body else p["name"]
+        if not name:
+            return _err("Farmer name is required.")
+        rsbsa_number = (body.get("rsbsa_number") or "").strip().upper() if "rsbsa_number" in body else p["rsbsa_number"]
+        if not rsbsa_number:
+            return _err("RSBSA number is required.")
+        new_key = db_id.rsbsa_key(rsbsa_number)
+        if new_key != p["rsbsa_key"]:
+            conflict = conn.execute("SELECT id FROM id_persons WHERE rsbsa_key = ? AND id != ?", (new_key, pid)).fetchone()
+            if conflict:
+                return _err(f"Another person with RSBSA {rsbsa_number} already exists in the ID database.", 409)
+
         birthdate = (body.get("birthdate") or "").strip()
         if birthdate:
             try:
                 datetime.date.fromisoformat(birthdate)
             except ValueError:
                 return _err("Birthdate must be a valid date.")
-        gender = db_id.normalize_gender(body.get("gender"))
+        gender = db_id.normalize_gender(body.get("gender")) if "gender" in body else p["gender"]
         fca = db_id.remember_fca(
             conn, body.get("affiliated_fca")
             if "affiliated_fca" in body else p["affiliated_fca"])
-        barangay = (body.get("barangay") or "").strip()
-        remarks = (body.get("remarks") or "").strip()
+        barangay = (body.get("barangay") or "").strip() if "barangay" in body else (p["barangay"] if "barangay" in p.keys() else "")
+        remarks = (body.get("remarks") or "").strip() if "remarks" in body else (p["remarks"] if "remarks" in p.keys() and p["remarks"] else "Active")
         if not remarks:
             remarks = (p["remarks"] if "remarks" in p.keys() and p["remarks"] else "Active")
         conn.execute(
-            "UPDATE id_persons SET gender = ?, civil_status = ?, "
+            "UPDATE id_persons SET name = ?, rsbsa_key = ?, rsbsa_number = ?, gender = ?, civil_status = ?, "
             "address = ?, birthdate = ?, contact_number = ?, "
             "emergency_contact = ?, affiliated_fca = ?, barangay = ?, remarks = ?, updated_at = ? "
             "WHERE id = ?",
-            (gender or None,
-             db_id.normalize_civil_status(body.get("civil_status")),
-             (body.get("address") or "").strip().upper(),
-             birthdate or None,
-             (body.get("contact_number") or "").strip(),
-             (body.get("emergency_contact") or "").strip().upper(),
+            (name, new_key, rsbsa_number,
+             gender or None,
+             db_id.normalize_civil_status(body.get("civil_status")) if "civil_status" in body else p["civil_status"],
+             (body.get("address") or "").strip().upper() if "address" in body else p["address"],
+             birthdate or None if "birthdate" in body else p["birthdate"],
+             (body.get("contact_number") or "").strip() if "contact_number" in body else p["contact_number"],
+             (body.get("emergency_contact") or "").strip().upper() if "emergency_contact" in body else p["emergency_contact"],
              fca or None,
-             barangay or (p["barangay"] if "barangay" in p.keys() else None),
+             barangay or None,
              remarks,
              db.now_iso(), pid))
         conn.commit()

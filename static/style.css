@@ -1017,3 +1017,29 @@ input[type="password"], input[type="date"], input[type="number"], input[type="fi
   border-radius: 4px;
 }
 
+.btn-action-icon {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 3px 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  line-height: 1;
+  transition: all 0.15s ease;
+  vertical-align: middle;
+}
+.btn-action-icon:hover {
+  background: #e5e7eb;
+  color: var(--primary);
+  border-color: #d1d5db;
+}
+.btn-action-icon:active {
+  transform: scale(0.95);
+}
+.btn-action-icon svg {
+  display: block;
+}
+
