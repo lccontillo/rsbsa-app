@@ -3123,7 +3123,7 @@ async function farmerIdModal(f, onDone) {
         <div class="field"><label>Contact Person in Case of Emergency (Name — Number)</label>
           <input id="fid-emergency" class="caps" value="${esc(f.emergency_contact || "")}" placeholder="MARIA CRUZ - 0917 123 4567"></div>
       </div>
-      <div class="field full"><label>Farmer's Affiliated FCA (printed below QR code at the back of the ID)</label>
+      <div class="field full"><label>Farmer's Affiliated FCA</label>
         <input id="fid-fca" class="caps" list="fid-fca-datalist" value="${esc(f.affiliated_fca || "")}" placeholder="Select or type FCA name (e.g. ALCALA FARMERS COOPERATIVE)">
         <datalist id="fid-fca-datalist"></datalist>
       </div>
@@ -3991,14 +3991,12 @@ function idGenPersonModal(p, onDone) {
       <div class="form-grid">
         <div class="field"><label>Gender</label>
           <select id="idg-gender" class="caps">${_choiceOptionsFor("gender", p.gender || "")}</select></div>
-        <div class="field"><label>Civil Status</label>
-          <select id="idg-civil" class="caps">${_choiceOptionsFor("civil", p.civil_status || "")}</select></div>
         <div class="field"><label>Birthdate</label>
           <input type="date" id="idg-birthdate" value="${esc(p.birthdate ? p.birthdate.slice(0, 10) : "")}"></div>
         <div class="field full"><label>Address</label>
           <input id="idg-address" class="caps" value="${esc(p.address || "")}" placeholder="PUROK / SITIO, BARANGAY, ALCALA, CAGAYAN"></div>
         <div class="field full">
-          <label>Farmer's Affiliated FCA (printed below QR code on the back of the ID)</label>
+          <label>Farmer's Affiliated FCA</label>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <input id="idg-fca" class="caps" list="idg-fca-datalist" value="${esc(p.affiliated_fca || "")}"
                    placeholder="Type FCA name or pick a saved FCA →" style="flex:2;min-width:220px">
@@ -4040,7 +4038,7 @@ function idGenPersonModal(p, onDone) {
     const btn = document.getElementById("idg-go");
     const body = {
       gender: document.getElementById("idg-gender").value,
-      civil_status: document.getElementById("idg-civil").value.trim(),
+      civil_status: document.getElementById("idg-civil") ? document.getElementById("idg-civil").value.trim() : (p.civil_status || ""),
       address: document.getElementById("idg-address").value.trim(),
       birthdate: document.getElementById("idg-birthdate").value,
       affiliated_fca: (document.getElementById("idg-fca").value || "").trim().toUpperCase(),

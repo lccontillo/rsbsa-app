@@ -70,6 +70,8 @@ _FONT_DIRS = [
     "/usr/share/fonts/opentype/inter",
     "/usr/share/fonts/truetype/dejavu",
     "/usr/share/fonts/dejavu",
+    "C:/Windows/Fonts",
+    "C:\\Windows\\Fonts",
 ]
 
 _FONT_FILES = {
@@ -98,6 +100,20 @@ def _font(name, size):
         p = os.path.join(d, fb)
         if os.path.exists(p):
             return ImageFont.truetype(p, size)
+    # Fallback for Windows if DejaVu is not installed
+    win_fb = ("consolab.ttf" if "Mono" in name else
+              "segoeuib.ttf" if any(
+                  w in name for w in ("Bold", "Black", "SemiBold", "Medium", "ExtraBold"))
+              else "segoeui.ttf")
+    for d in _FONT_DIRS:
+        p = os.path.join(d, win_fb)
+        if os.path.exists(p):
+            return ImageFont.truetype(p, size)
+    for win_fb2 in ("arialbd.ttf" if any(w in name for w in ("Bold", "Black", "SemiBold", "Medium", "ExtraBold")) else "arial.ttf",):
+        for d in _FONT_DIRS:
+            p = os.path.join(d, win_fb2)
+            if os.path.exists(p):
+                return ImageFont.truetype(p, size)
     return ImageFont.load_default()
 
 
@@ -288,14 +304,12 @@ def render_front(farmer: dict, control_no: str, valid_until: str,
         _field(d, x, S(438), "Gender", "—", vsize=24)
     _field(d, x + S(306), S(438), "Birthdate", farmer.get("birthdate") or "—",
            vsize=24)
-    _field(d, x, S(516), "Civil Status", farmer.get("civil_status"),
-           vsize=24)
-    _tracked(d, x + S(306), S(516), "ADDRESS", F(14, weight="semi"),
+    _tracked(d, x, S(516), "ADDRESS", F(14, weight="semi"),
              DESIGN["muted"])
     ay = S(538)
     for line in _wrap(d, farmer.get("address"), F(20, weight="med"),
-                      S(262))[:2]:
-        d.text((x + S(306), ay), line, font=F(20, weight="med"),
+                      S(580))[:2]:
+        d.text((x, ay), line, font=F(20, weight="med"),
                fill=DESIGN["ink"])
         ay += S(24)
 
@@ -352,46 +366,9 @@ def render_back(farmer: dict, control_no: str, issued_at: str,
     img.paste(qr_img, (qx + S(22), qy + S(22)))
     d = ImageDraw.Draw(img)
 
-    # Farmer's Affiliated FCA panel directly below the QR code
-    fx0, fy0, fx1, fy1 = qx, S(476), qx + qs, S(604)
-    d.rounded_rectangle([fx0, fy0, fx1, fy1], radius=S(18),
-                        fill=DESIGN["chip"], outline=DESIGN["grad_a"],
-                        width=S(2))
-    _tracked(d, fx0 + S(18), fy0 + S(14), "AFFILIATED FCA",
-             F(13, weight="bold"), DESIGN["green"], tracking=2)
-    fca_val = str(farmer.get("affiliated_fca") or "").strip().upper() or "—"
-    fca_max_w = (fx1 - fx0) - S(36)
-    fca_lines = [fca_val]
-    fca_font = F(22, weight="bold")
-    for pt in range(22, 13, -1):
-        cand = F(pt, weight="bold")
-        wrapped = _wrap(d, fca_val, cand, fca_max_w)
-        if len(wrapped) == 1 and d.textlength(wrapped[0], font=cand) <= fca_max_w:
-            fca_font = cand
-            fca_lines = wrapped
-            break
-        if len(wrapped) <= 2 and pt <= 19:
-            fca_font = cand
-            fca_lines = wrapped[:2]
-            break
-    else:
-        fca_font = F(14, weight="bold")
-        fca_lines = _wrap(d, fca_val, fca_font, fca_max_w)[:2]
-    line_step = int(fca_font.size * 1.15)
-    total_text_h = len(fca_lines) * line_step
-    text_top = fy0 + S(38) + max(0, ((fy1 - fy0 - S(52)) - total_text_h) // 2)
-    for idx_line, line in enumerate(fca_lines):
-        d.text((fx0 + S(18), text_top + idx_line * line_step), line,
-               font=fca_font, fill=DESIGN["ink"])
-
-    # signature + issued line: the issued line sits high so there is a
-    # clear blank area to sign in above the signature line
-    d.text((S(44), S(492)), f"issued {issued_at}  ·  {control_no}",
+    # Issued date + control number footer
+    d.text((S(44), S(584)), f"issued {issued_at}  ·  {control_no}",
            font=F(16, weight="med"), fill=DESIGN["muted"])
-    d.line([S(44), S(588), S(540), S(588)], fill=DESIGN["muted"],
-           width=S(2))
-    d.text((S(44), S(596)), "farmer's signature", font=F(15, weight="med"),
-           fill=DESIGN["muted"])
     return img
 
 
