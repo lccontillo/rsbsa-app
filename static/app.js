@@ -3998,39 +3998,37 @@ function idGenPersonModal(p, onDone) {
         <a class="btn" href="/api/id-generator/persons/${p.id}/id-card/back">⬇ Back PNG</a>
       </div>
     </div>` : `<div id="fid-preview"></div>`;
-  const copySvg = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
-  const editSvg = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>`;
-  const saveSvg = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>`;
+  const copySvg = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
+  const editSvg = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>`;
+  const saveSvg = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>`;
 
   showModal(`
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
-      <div id="fid-header-view" style="display:flex;align-items:center;gap:6px;flex:1;min-width:0">
-        <h3 style="margin:0;display:inline-flex;align-items:center;gap:6px;word-break:break-word">
-          🪪 Farmer's ID — <span id="fid-title-name">${esc(p.name)}</span>
-        </h3>
-        <button class="btn-action-icon" id="fid-btn-edit" type="button" title="Edit Farmer's Name" style="flex-shrink:0">
-          ${editSvg}
-        </button>
-        <button class="btn-action-icon" id="fid-btn-copy" type="button" title="Copy Farmer's Name and RSBSA No." style="flex-shrink:0">
-          ${copySvg}
-        </button>
-      </div>
-      <div id="fid-header-edit" style="display:none;align-items:center;gap:8px;flex:1;min-width:280px">
-        <input type="text" id="fid-name-input" class="caps" value="${esc(p.name)}" placeholder="Farmer's Name" style="flex:1;padding:6px 10px;font-size:15px;font-weight:600">
-        <button class="btn btn-sm btn-primary" id="fid-btn-save" type="button" style="display:inline-flex;align-items:center;gap:4px">
-          ${saveSvg} <span>Save</span>
-        </button>
-        <button class="btn btn-sm" id="fid-btn-cancel-edit" type="button">Cancel</button>
-      </div>
-    </div>
+    <h3>🪪 Farmer's ID — ${esc(p.name)}</h3>
     <p class="page-sub">Check and complete the ID details below. Details are saved to the ID database for one-click regenerations.</p>
     ${hasId ? `<div class="notice">ID <b class="mono">${esc(p.id_control_no)}</b>
       is already generated — valid until ${fmtD(p.id_valid_until)}
       (${p.id_reprints || 0} regeneration(s)). Generating again will
       <b>regenerate</b> the ID card with the same control number.</div>` : ""}
     <div class="meta-grid" style="margin-bottom:12px">
-      <div class="meta-item"><div class="k">RSBSA No.</div>
-        <div class="v mono">${esc(p.rsbsa_number)}</div></div>
+      <div class="meta-item">
+        <div class="k">RSBSA No.</div>
+        <div id="fid-rsbsa-view" style="display:flex;align-items:center;gap:4px">
+          <span class="v mono" id="fid-rsbsa-val" style="font-weight:600">${esc(p.rsbsa_number || "—")}</span>
+          <button class="btn-action-icon" id="fid-rsbsa-btn-edit" type="button" title="Edit RSBSA Number" style="padding:2px 5px">
+            ${editSvg}
+          </button>
+          <button class="btn-action-icon" id="fid-rsbsa-btn-copy" type="button" title="Copy RSBSA Number" style="padding:2px 5px">
+            ${copySvg}
+          </button>
+        </div>
+        <div id="fid-rsbsa-edit" style="display:none;align-items:center;gap:5px;margin-top:2px">
+          <input type="text" id="fid-rsbsa-input" class="mono caps" value="${esc(p.rsbsa_number || "")}" placeholder="02-15-..." style="padding:3px 6px;font-size:13px;width:170px">
+          <button class="btn btn-sm btn-primary" id="fid-rsbsa-btn-save" type="button" style="padding:3px 7px;font-size:12px;display:inline-flex;align-items:center;gap:3px">
+            ${saveSvg} <span>Save</span>
+          </button>
+          <button class="btn btn-sm" id="fid-rsbsa-btn-cancel" type="button" style="padding:3px 7px;font-size:12px">Cancel</button>
+        </div>
+      </div>
       <div class="meta-item"><div class="k">Gender</div>
         <div class="v">${esc(p.gender || "—")}</div></div>
       <div class="meta-item"><div class="k">Birthdate</div>
@@ -4078,70 +4076,69 @@ function idGenPersonModal(p, onDone) {
       <button class="btn btn-primary" id="idg-go" type="button">${hasId ? "🖨 Regenerate ID Card" : "🪪 Generate ID Card"}</button>
     </div>`, 800);
 
-  // Edit and Copy icon interactions in Farmer's ID header
-  const headerView = document.getElementById("fid-header-view");
-  const headerEdit = document.getElementById("fid-header-edit");
-  const btnEdit = document.getElementById("fid-btn-edit");
-  const btnCopy = document.getElementById("fid-btn-copy");
-  const btnSave = document.getElementById("fid-btn-save");
-  const btnCancelEdit = document.getElementById("fid-btn-cancel-edit");
-  const nameInput = document.getElementById("fid-name-input");
-  const titleName = document.getElementById("fid-title-name");
+  // Edit and Copy icon interactions beside RSBSA No.
+  const rsbsaView = document.getElementById("fid-rsbsa-view");
+  const rsbsaEdit = document.getElementById("fid-rsbsa-edit");
+  const btnEditRsbsa = document.getElementById("fid-rsbsa-btn-edit");
+  const btnCopyRsbsa = document.getElementById("fid-rsbsa-btn-copy");
+  const btnSaveRsbsa = document.getElementById("fid-rsbsa-btn-save");
+  const btnCancelRsbsa = document.getElementById("fid-rsbsa-btn-cancel");
+  const rsbsaInput = document.getElementById("fid-rsbsa-input");
+  const rsbsaVal = document.getElementById("fid-rsbsa-val");
 
-  if (btnCopy) {
-    btnCopy.addEventListener("click", () => {
-      const copyTextVal = p.rsbsa_number ? `${p.name} (${p.rsbsa_number})` : p.name;
-      copyToClipboard(copyTextVal, `Copied: ${copyTextVal}`);
+  if (btnCopyRsbsa) {
+    btnCopyRsbsa.addEventListener("click", () => {
+      copyToClipboard(p.rsbsa_number, "RSBSA Number copied!");
     });
   }
 
-  if (btnEdit && headerView && headerEdit) {
-    btnEdit.addEventListener("click", () => {
-      headerView.style.display = "none";
-      headerEdit.style.display = "flex";
-      nameInput.value = p.name || "";
-      nameInput.focus();
-      nameInput.select();
+  if (btnEditRsbsa && rsbsaView && rsbsaEdit) {
+    btnEditRsbsa.addEventListener("click", () => {
+      rsbsaView.style.display = "none";
+      rsbsaEdit.style.display = "flex";
+      rsbsaInput.value = p.rsbsa_number || "";
+      rsbsaInput.focus();
+      rsbsaInput.select();
     });
 
-    btnCancelEdit.addEventListener("click", () => {
-      headerEdit.style.display = "none";
-      headerView.style.display = "flex";
+    btnCancelRsbsa.addEventListener("click", () => {
+      rsbsaEdit.style.display = "none";
+      rsbsaView.style.display = "flex";
     });
 
-    nameInput.addEventListener("keydown", (e) => {
+    rsbsaInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
-        btnSave.click();
+        btnSaveRsbsa.click();
       } else if (e.key === "Escape") {
-        btnCancelEdit.click();
+        btnCancelRsbsa.click();
       }
     });
 
-    btnSave.addEventListener("click", async () => {
-      const newName = (nameInput.value || "").trim().toUpperCase();
-      if (!newName) {
-        toast("Farmer name cannot be empty.", "err");
+    btnSaveRsbsa.addEventListener("click", async () => {
+      const newRsbsa = (rsbsaInput.value || "").trim().toUpperCase();
+      if (!newRsbsa) {
+        toast("RSBSA number cannot be empty.", "err");
         return;
       }
-      btnSave.disabled = true;
-      btnSave.querySelector("span").textContent = "Saving…";
+      btnSaveRsbsa.disabled = true;
+      btnSaveRsbsa.querySelector("span").textContent = "Saving…";
       try {
         const updated = await api(`/api/id-generator/persons/${p.id}`, {
           method: "PUT",
-          body: { name: newName }
+          body: { rsbsa_number: newRsbsa }
         });
-        p.name = updated.name || newName;
-        titleName.textContent = p.name;
-        headerEdit.style.display = "none";
-        headerView.style.display = "flex";
-        toast("Farmer data updated successfully!");
+        p.rsbsa_number = updated.rsbsa_number || newRsbsa;
+        rsbsaVal.textContent = p.rsbsa_number;
+        rsbsaEdit.style.display = "none";
+        rsbsaView.style.display = "flex";
+        toast("RSBSA Number updated successfully!");
         if (onDone) onDone();
       } catch (err) {
         toast(err.message, "err");
       } finally {
-        btnSave.disabled = false;
-        btnSave.querySelector("span").textContent = "Save";
+        btnSaveRsbsa.disabled = false;
+        btnSaveRsbsa.querySelector("span").textContent = "Save";
       }
     });
   }
