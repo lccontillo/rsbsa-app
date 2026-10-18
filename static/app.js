@@ -526,6 +526,88 @@ function fmtD(iso) {
   } catch (_) { return iso; }
 }
 
+function formatMMDDYYYY(val) {
+  if (!val) return "";
+  const s = String(val).trim();
+  if (!s || s === "—" || s === "-") return "";
+  const m2 = s.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+  if (m2) {
+    const [_, yr, mo, dy] = m2;
+    return `${String(mo).padStart(2, "0")}/${String(dy).padStart(2, "0")}/${yr}`;
+  }
+  const m1 = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if (m1) {
+    let [_, p1, p2, yr] = m1;
+    let n1 = Number(p1), n2 = Number(p2);
+    if (n1 > 12 && n2 <= 12) {
+      return `${String(n2).padStart(2, "0")}/${String(n1).padStart(2, "0")}/${yr}`;
+    }
+    return `${String(n1).padStart(2, "0")}/${String(p2).padStart(2, "0")}/${yr}`;
+  }
+  return s;
+}
+
+function toIsoDate(val) {
+  if (!val) return "";
+  const s = String(val).trim();
+  if (!s || s === "—" || s === "-") return "";
+  const m1 = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if (m1) {
+    let [_, mo, dy, yr] = m1;
+    let n1 = Number(mo), n2 = Number(dy);
+    if (n1 > 12 && n2 <= 12) {
+      [mo, dy] = [dy, mo];
+    }
+    return `${yr}-${String(mo).padStart(2, "0")}-${String(dy).padStart(2, "0")}`;
+  }
+  const m2 = s.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+  if (m2) {
+    const [_, yr, mo, dy] = m2;
+    return `${yr}-${String(mo).padStart(2, "0")}-${String(dy).padStart(2, "0")}`;
+  }
+  return s;
+}
+
+function bindMmDdYyyyPicker(textInputId, hiddenDateId, pickerBtnId) {
+  const textInput = document.getElementById(textInputId);
+  const hiddenDate = document.getElementById(hiddenDateId);
+  const pickerBtn = document.getElementById(pickerBtnId);
+  if (!textInput) return;
+
+  textInput.addEventListener("input", (e) => {
+    let v = textInput.value.replace(/[^\d/]/g, "");
+    if (e.inputType !== "deleteContentBackward") {
+      const digits = v.replace(/\D/g, "");
+      if (digits.length >= 5) {
+        v = `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4, 8)}`;
+      } else if (digits.length >= 3) {
+        v = `${digits.slice(0, 2)}/${digits.slice(2, 4)}`;
+      }
+    }
+    textInput.value = v;
+    const iso = toIsoDate(v);
+    if (iso && hiddenDate) hiddenDate.value = iso;
+  });
+
+  if (pickerBtn && hiddenDate) {
+    pickerBtn.addEventListener("click", () => {
+      const iso = toIsoDate(textInput.value);
+      if (iso) hiddenDate.value = iso;
+      if (typeof hiddenDate.showPicker === "function") {
+        try { hiddenDate.showPicker(); } catch (_) { hiddenDate.click(); }
+      } else {
+        hiddenDate.click();
+      }
+    });
+
+    hiddenDate.addEventListener("change", () => {
+      if (hiddenDate.value) {
+        textInput.value = formatMMDDYYYY(hiddenDate.value);
+      }
+    });
+  }
+}
+
 function statusBadge(s) {
   const label = { pending: "Pending", approved: "Issued", rejected: "Rejected" }[s] || s;
   return `<span class="badge ${esc(s)}">${label}</span>`;
@@ -3047,8 +3129,30 @@ async function farmerEditModal(f, onSaved) {
       </div>
       <div class="field"><label>Gender</label>
         <select id="ed-gender" class="caps" ${isAdmin ? "" : "disabled"}>${_choiceOptionsFor("gender", f.gender || "")}</select></div>
-      <div class="field"><label>Birthdate</label>
-        <input type="date" id="ed-birthdate" value="${esc(f.birthdate ? f.birthdate.slice(0, 10) : "")}" ${isAdmin ? "" : "readonly style='background:#f3f4f6'"}></div>
+      <div class="field"><label>Birthdate <span class="small muted" style="font-weight:400">(MM/DD/YYYY)</span></label>
+        <div style="position:relative;display:flex;align-items:center">
+          <input type="text" id="ed-birthdate" class="no-caps"
+                 placeholder="MM/DD/YYYY" maxlength="10"
+                 value="${esc(formatMMDDYYYY(f.birthdate))}"
+                 ${isAdmin ? "" : "readonly style='background:#f3f4f6'"}
+                 style="padding-right:38px;width:100%">
+          ${isAdmin ? `
+            <button type="button" id="ed-birthdate-picker-btn"
+                    style="position:absolute;right:6px;background:none;border:none;cursor:pointer;padding:4px 6px;display:flex;align-items:center;color:#64748b;border-radius:4px"
+                    title="Pick date from calendar">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                <line x1="16" y1="2" x2="16" y2="6"></line>
+                <line x1="8" y1="2" x2="8" y2="6"></line>
+                <line x1="3" y1="10" x2="21" y2="10"></line>
+              </svg>
+            </button>
+            <input type="date" id="ed-birthdate-hidden" tabindex="-1" aria-hidden="true"
+                   value="${esc(toIsoDate(f.birthdate))}"
+                   style="position:absolute;right:0;bottom:0;width:0;height:0;opacity:0;pointer-events:none;border:none">
+          ` : ""}
+        </div>
+      </div>
       <div class="field"><label>Civil Status</label>
         <select id="ed-civil" class="caps" ${isAdmin ? "" : "disabled"}>${_choiceOptionsFor("civil", f.civil_status || "")}</select></div>
       <div class="field"><label>Barangay *</label>
@@ -3063,6 +3167,7 @@ async function farmerEditModal(f, onSaved) {
       <button class="btn btn-primary" id="ed-save">${isAdmin ? "Save changes" : "Submit Remarks Change"}</button>
     </div>`, 640);
   bind("ed-cancel", "click", closeModal);
+  if (isAdmin) bindMmDdYyyyPicker("ed-birthdate", "ed-birthdate-hidden", "ed-birthdate-picker-btn");
   bind("ed-save", "click", async () => {
     const remarks = document.getElementById("ed-remarks").value;
     if (!isAdmin) {
@@ -3079,7 +3184,7 @@ async function farmerEditModal(f, onSaved) {
       rsbsa_number: document.getElementById("ed-rsbsa").value.trim(),
       remarks: remarks,
       gender: document.getElementById("ed-gender")?.value || "",
-      birthdate: document.getElementById("ed-birthdate")?.value || "",
+      birthdate: toIsoDate(document.getElementById("ed-birthdate")?.value || ""),
       civil_status: document.getElementById("ed-civil").value.trim(),
       address: document.getElementById("ed-address").value.trim(),
       barangay_id: Number(document.getElementById("ed-barangay").value),
@@ -3140,8 +3245,27 @@ async function farmerIdModal(f, onDone) {
       <div class="form-grid">
         <div class="field"><label>Gender</label>
           <select id="fid-gender" class="caps">${_choiceOptionsFor("gender", f.gender || "")}</select></div>
-        <div class="field"><label>Birthdate</label>
-          <input type="date" id="fid-birthdate" value="${esc(f.birthdate ? f.birthdate.slice(0, 10) : "")}"></div>
+        <div class="field"><label>Birthdate <span class="small muted" style="font-weight:400">(MM/DD/YYYY)</span></label>
+          <div style="position:relative;display:flex;align-items:center">
+            <input type="text" id="fid-birthdate" class="no-caps"
+                   placeholder="MM/DD/YYYY" maxlength="10"
+                   value="${esc(formatMMDDYYYY(f.birthdate))}"
+                   style="padding-right:38px;width:100%">
+            <button type="button" id="fid-birthdate-picker-btn"
+                    style="position:absolute;right:6px;background:none;border:none;cursor:pointer;padding:4px 6px;display:flex;align-items:center;color:#64748b;border-radius:4px"
+                    title="Pick date from calendar">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                <line x1="16" y1="2" x2="16" y2="6"></line>
+                <line x1="8" y1="2" x2="8" y2="6"></line>
+                <line x1="3" y1="10" x2="21" y2="10"></line>
+              </svg>
+            </button>
+            <input type="date" id="fid-birthdate-hidden" tabindex="-1" aria-hidden="true"
+                   value="${esc(toIsoDate(f.birthdate))}"
+                   style="position:absolute;right:0;bottom:0;width:0;height:0;opacity:0;pointer-events:none;border:none">
+          </div>
+        </div>
         <div class="field"><label>Contact Number</label>
           <input id="fid-contact" class="caps" value="${esc(f.contact_number || "")}" placeholder="09XX XXX XXXX"></div>
         <div class="field"><label>Contact Person in Case of Emergency (Name — Number)</label>
@@ -3176,6 +3300,7 @@ async function farmerIdModal(f, onDone) {
       <button class="btn btn-primary" id="fid-go" type="button">${hasId ? "🖨 Reprint ID Card" : "🪪 Generate ID Card"}</button>
     </div>`, 800);
   bind("fid-close", "click", closeModal);
+  bindMmDdYyyyPicker("fid-birthdate", "fid-birthdate-hidden", "fid-birthdate-picker-btn");
   fetchFcaNames().then((names) => {
     const dl = document.getElementById("fid-fca-datalist");
     if (dl) dl.innerHTML = names.map((n) => `<option value="${esc(n)}"></option>`).join("");
@@ -3190,7 +3315,7 @@ async function farmerIdModal(f, onDone) {
     const btn = document.getElementById("fid-go");
     const extras = {
       gender: document.getElementById("fid-gender") ? document.getElementById("fid-gender").value : "",
-      birthdate: document.getElementById("fid-birthdate").value,
+      birthdate: toIsoDate(document.getElementById("fid-birthdate").value),
       contact_number: document.getElementById("fid-contact").value.trim(),
       emergency_contact: document.getElementById("fid-emergency").value.trim(),
       affiliated_fca: (document.getElementById("fid-fca").value || "").trim().toUpperCase(),
@@ -3482,6 +3607,8 @@ async function farmerModal(id) {
   let f;
   try { f = await api(`/api/farmers/${id}`); }
   catch (err) { toast(err.message, "err"); return; }
+  const bust = Date.now();
+  const isAdmin = ME && ME.role === "admin";
   const dataRows = Object.entries(f.data || {}).slice(0, 12).map(([k, v]) =>
     `<tr><td style="width:42%"><b>${esc(
       k.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()))}</b></td>
@@ -3495,25 +3622,48 @@ async function farmerModal(id) {
       <td class="mono">${esc(r.cert_nos || "—")}</td>
     </tr>`).join("");
   showModal(`
-    <h3>${esc(f.name)}</h3>
-    <div class="meta-grid" style="margin-bottom:12px">
-      <div class="meta-item"><div class="k">RSBSA No.</div>
-        <div class="v mono">${esc(f.rsbsa_number || "—")}</div></div>
-      <div class="meta-item"><div class="k">Barangay</div>
-        <div class="v">${esc(f.barangay || "—")}</div></div>
-      <div class="meta-item"><div class="k">Verification</div>
-        <div class="v">${f.verification_status === "new"
-          ? `<span class="badge pending">NEW — for admin verification</span>`
-          : `<span class="badge approved">Verified</span>${f.verified_at ? ` <span class="small muted">${fmtD(f.verified_at)}</span>` : ""}`}</div></div>
-      <div class="meta-item"><div class="k">Farmer's ID</div>
-        <div class="v">${f.id_card
-          ? `<span class="mono">${esc(f.id_card.control_no)}</span>
-             <span class="small muted">issued ${fmtD(f.id_card.issued_at)} · valid until ${fmtD(f.id_card.valid_until)} · ${f.id_card.reprint_count} reprint(s)</span>`
-          : `<span class="muted">Not yet issued</span>`}</div></div>
-      <div class="meta-item"><div class="k">First request</div>
-        <div class="v">${fmtD(f.first_seen)}</div></div>
-      <div class="meta-item"><div class="k">Last request</div>
-        <div class="v">${fmtD(f.last_seen)}</div></div>
+    <div style="display:flex;gap:18px;align-items:flex-start;margin-bottom:14px;flex-wrap:wrap">
+      <div style="flex-shrink:0;text-align:center">
+        ${f.has_photo ? `
+          <a href="/api/farmers/${f.id}/photo?v=${bust}" target="_blank" title="Click to view full photo">
+            <img class="id-thumb" src="/api/farmers/${f.id}/photo?v=${bust}" alt="${esc(f.name)}"
+                 style="width:96px;height:116px;object-fit:cover;border-radius:8px;border:2px solid #cbd5e1;box-shadow:0 2px 6px rgba(0,0,0,0.08);display:block;background:#f8fafc">
+          </a>
+        ` : `
+          <div style="width:96px;height:116px;border-radius:8px;border:2px dashed #cbd5e1;background:#f8fafc;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#94a3b8;font-size:11px;text-align:center;padding:6px;box-sizing:border-box">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.6;margin-bottom:4px"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+            <span>No photo</span>
+          </div>
+        `}
+        ${isAdmin ? `
+          <label class="btn btn-sm" style="margin-top:6px;cursor:pointer;font-size:11px;padding:2px 8px;display:inline-block">
+            ${f.has_photo ? "Change" : "Upload"}
+            <input type="file" id="far-photo-input" accept="image/png,image/jpeg,image/webp" style="display:none">
+          </label>
+        ` : ""}
+      </div>
+      <div style="flex:1;min-width:280px">
+        <h3 style="margin-top:0;margin-bottom:10px">${esc(f.name)}</h3>
+        <div class="meta-grid">
+          <div class="meta-item"><div class="k">RSBSA No.</div>
+            <div class="v mono">${esc(f.rsbsa_number || "—")}</div></div>
+          <div class="meta-item"><div class="k">Barangay</div>
+            <div class="v">${esc(f.barangay || "—")}</div></div>
+          <div class="meta-item"><div class="k">Verification</div>
+            <div class="v">${f.verification_status === "new"
+              ? `<span class="badge pending">NEW — for admin verification</span>`
+              : `<span class="badge approved">Verified</span>${f.verified_at ? ` <span class="small muted">${fmtD(f.verified_at)}</span>` : ""}`}</div></div>
+          <div class="meta-item"><div class="k">Farmer's ID</div>
+            <div class="v">${f.id_card
+              ? `<span class="mono">${esc(f.id_card.control_no)}</span>
+                 <span class="small muted">issued ${fmtD(f.id_card.issued_at)} · valid until ${fmtD(f.id_card.valid_until)} · ${f.id_card.reprint_count} reprint(s)</span>`
+              : `<span class="muted">Not yet issued</span>`}</div></div>
+          <div class="meta-item"><div class="k">First request</div>
+            <div class="v">${fmtD(f.first_seen)}</div></div>
+          <div class="meta-item"><div class="k">Last request</div>
+            <div class="v">${fmtD(f.last_seen)}</div></div>
+        </div>
+      </div>
     </div>
     ${dataRows ? `<table class="table"><tbody>${dataRows}</tbody></table>` : ""}
     <h3 style="margin-top:14px">Request history</h3>
@@ -3526,6 +3676,21 @@ async function farmerModal(id) {
       <button class="btn" id="far-close">Close</button>
     </div>`, 740);
   bind("far-close", "click", closeModal);
+  const photoInput = document.getElementById("far-photo-input");
+  if (photoInput) {
+    photoInput.addEventListener("change", async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const fd = new FormData();
+      fd.append("photo", file);
+      try {
+        await api(`/api/farmers/${f.id}/photo`, { method: "POST", body: fd });
+        toast("Profile photo updated.");
+        closeModal();
+        farmerModal(f.id);
+      } catch (err) { toast(err.message, "err"); }
+    });
+  }
 }
 
 
@@ -3671,7 +3836,7 @@ async function viewIdGenerator() {
             <td>${esc(p.barangay || "—")}</td>
             <td><span class="badge ${p.remarks === 'Active' ? 'approved' : 'neutral'}">${esc(p.remarks || 'Active')}</span></td>
             <td>${esc(p.gender || "—")}</td>
-            <td>${esc(p.birthdate ? p.birthdate.slice(0, 10) : "—")}</td>
+            <td>${esc(formatMMDDYYYY(p.birthdate) || "—")}</td>
             <td>${p.id_control_no
               ? `<span class="badge blue mono">${esc(p.id_control_no)}</span>
                  <div class="small muted">until ${fmtD(p.id_valid_until)}${p.id_reprints ? ` · ${p.id_reprints} regen` : ""}</div>`
@@ -4032,7 +4197,7 @@ function idGenPersonModal(p, onDone) {
       <div class="meta-item"><div class="k">Gender</div>
         <div class="v">${esc(p.gender || "—")}</div></div>
       <div class="meta-item"><div class="k">Birthdate</div>
-        <div class="v">${esc(p.birthdate ? p.birthdate.slice(0, 10) : "—")}</div></div>
+        <div class="v">${esc(formatMMDDYYYY(p.birthdate) || "—")}</div></div>
       <div class="meta-item"><div class="k">Barangay</div>
         <div class="v">${esc(p.barangay || "—")}</div></div>
     </div>
@@ -4052,8 +4217,27 @@ function idGenPersonModal(p, onDone) {
       <div class="form-grid">
         <div class="field"><label>Gender</label>
           <select id="idg-gender" class="caps">${_choiceOptionsFor("gender", p.gender || "")}</select></div>
-        <div class="field"><label>Birthdate</label>
-          <input type="date" id="idg-birthdate" value="${esc(p.birthdate ? p.birthdate.slice(0, 10) : "")}"></div>
+        <div class="field"><label>Birthdate <span class="small muted" style="font-weight:400">(MM/DD/YYYY)</span></label>
+          <div style="position:relative;display:flex;align-items:center">
+            <input type="text" id="idg-birthdate" class="no-caps"
+                   placeholder="MM/DD/YYYY" maxlength="10"
+                   value="${esc(formatMMDDYYYY(p.birthdate))}"
+                   style="padding-right:38px;width:100%">
+            <button type="button" id="idg-birthdate-picker-btn"
+                    style="position:absolute;right:6px;background:none;border:none;cursor:pointer;padding:4px 6px;display:flex;align-items:center;color:#64748b;border-radius:4px"
+                    title="Pick date from calendar">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                <line x1="16" y1="2" x2="16" y2="6"></line>
+                <line x1="8" y1="2" x2="8" y2="6"></line>
+                <line x1="3" y1="10" x2="21" y2="10"></line>
+              </svg>
+            </button>
+            <input type="date" id="idg-birthdate-hidden" tabindex="-1" aria-hidden="true"
+                   value="${esc(toIsoDate(p.birthdate))}"
+                   style="position:absolute;right:0;bottom:0;width:0;height:0;opacity:0;pointer-events:none;border:none">
+          </div>
+        </div>
         <div class="field full"><label>Address</label>
           <input id="idg-address" class="caps" value="${esc(p.address || "")}" placeholder="PUROK / SITIO, BARANGAY, ALCALA, CAGAYAN"></div>
         <div class="field full">
@@ -4163,13 +4347,14 @@ function idGenPersonModal(p, onDone) {
     previewId: "idg-photo-preview",
     statusId: "idg-photo-status",
   });
+  bindMmDdYyyyPicker("idg-birthdate", "idg-birthdate-hidden", "idg-birthdate-picker-btn");
   bind("idg-go", "click", async () => {
     const btn = document.getElementById("idg-go");
     const body = {
       gender: document.getElementById("idg-gender").value,
       civil_status: document.getElementById("idg-civil") ? document.getElementById("idg-civil").value.trim() : (p.civil_status || ""),
       address: document.getElementById("idg-address").value.trim(),
-      birthdate: document.getElementById("idg-birthdate").value,
+      birthdate: toIsoDate(document.getElementById("idg-birthdate").value),
       affiliated_fca: (document.getElementById("idg-fca").value || "").trim().toUpperCase(),
     };
     btn.disabled = true; btn.textContent = hasId ? "Regenerating…" : "Generating…";

@@ -2258,6 +2258,13 @@ def farmer_detail(fid):
         "JOIN templates t ON t.id = r.template_id "
         "WHERE rf.farmer_id = ? ORDER BY r.id DESC", (fid,)).fetchall()
     f_dict = dict(f)
+    photo_rel = f_dict.get("photo_path")
+    if not photo_rel or not os.path.exists(os.path.join(db.INSTANCE_DIR, photo_rel)):
+        if _gen_person and _gen_person.get("photo_path"):
+            gen_rel = _gen_person["photo_path"]
+            if os.path.exists(os.path.join(db.INSTANCE_DIR, gen_rel)):
+                photo_rel = gen_rel
+    has_photo = bool(photo_rel)
     return jsonify(
         id=f["id"], name=f["name"], rsbsa_number=f["rsbsa_number"],
         civil_status=f["civil_status"], address=f["address"],
@@ -2273,7 +2280,8 @@ def farmer_detail(fid):
         pending_remarks_at=f_dict.get("pending_remarks_at"),
         birthdate=f["birthdate"], contact_number=f["contact_number"],
         emergency_contact=f["emergency_contact"],
-        blood_type=f["blood_type"], has_photo=bool(f["photo_path"]),
+        blood_type=f["blood_type"], has_photo=has_photo,
+        photo_url=f"/api/farmers/{fid}/photo" if has_photo else None,
         id_card=(dict(idrow) if idrow else None),
         data=json.loads(f["data_json"]),
         requests=[dict(r) for r in reqs],
@@ -2296,6 +2304,13 @@ def update_farmer(fid):
     civil = _normalize_civil_status(body.get("civil_status"))
     address = str(body.get("address") or "").strip().upper()
     birthdate = str(body.get("birthdate") or "").strip()
+    if birthdate:
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%d/%m/%Y", "%d-%m-%Y"):
+            try:
+                birthdate = datetime.datetime.strptime(birthdate[:10], fmt).date().isoformat()
+                break
+            except ValueError:
+                pass
     contact = str(body.get("contact_number") or "").strip()
     emergency = str(body.get("emergency_contact") or "").strip().upper()
     blood = str(body.get("blood_type") or "").strip().upper()
@@ -2767,6 +2782,23 @@ def upload_farmer_photo(fid):
            f"(RSBSA {f['rsbsa_number'] or '—'})",
            barangay_id=f["barangay_id"])
     g.db.commit()
+    if os.path.exists(db_id.ID_DB_PATH):
+        try:
+            conn_id = db_id.connect()
+            try:
+                p = conn_id.execute(
+                    "SELECT id FROM id_persons WHERE source_farmer_id = ? OR "
+                    "rsbsa_key = ?",
+                    (fid, db_id.rsbsa_key(f["rsbsa_number"] or ""))).fetchone()
+                if p:
+                    conn_id.execute(
+                        "UPDATE id_persons SET photo_path = ?, updated_at = ? "
+                        "WHERE id = ?", (rel, db.now_iso(), p["id"]))
+                    conn_id.commit()
+            finally:
+                conn_id.close()
+        except Exception:
+            pass
     return jsonify(ok=True, photo_url=f"/api/farmers/{fid}/photo")
 
 
@@ -2779,9 +2811,17 @@ def get_farmer_photo(fid):
     scope = _scope_barangay_id()
     if scope is not None and f["barangay_id"] != scope:
         return _err("This farmer belongs to another barangay.", 403)
-    if not f["photo_path"]:
+    f_dict = dict(f)
+    photo_rel = f_dict.get("photo_path")
+    if not photo_rel or not os.path.exists(os.path.join(db.INSTANCE_DIR, photo_rel)):
+        gen_p, _ = _id_person_for_farmer(f)
+        if gen_p and gen_p.get("photo_path"):
+            gen_rel = gen_p["photo_path"]
+            if os.path.exists(os.path.join(db.INSTANCE_DIR, gen_rel)):
+                photo_rel = gen_rel
+    if not photo_rel:
         return _err("No photo uploaded yet.", 404)
-    path = os.path.join(db.INSTANCE_DIR, f["photo_path"])
+    path = os.path.join(db.INSTANCE_DIR, photo_rel)
     if not os.path.exists(path):
         return _err("Photo file is missing.", 404)
     return send_file(path)
@@ -2915,7 +2955,7 @@ def _overlay_id_generator_status(rows):
         conn = db_id.connect()
         try:
             cards = {r["rsbsa_key"]: r for r in conn.execute(
-                "SELECT p.rsbsa_key, p.id AS person_id, c.control_no, "
+                "SELECT p.rsbsa_key, p.id AS person_id, p.photo_path, c.control_no, "
                 "c.valid_until, c.reprint_count FROM id_persons p "
                 "LEFT JOIN id_cards c ON c.person_id = p.id").fetchall()}
         finally:
@@ -2926,6 +2966,8 @@ def _overlay_id_generator_status(rows):
         info = cards.get(db_id.rsbsa_key(r.get("rsbsa_number") or ""))
         if info:
             r["id_generator_person_id"] = info["person_id"]
+            if not r.get("photo_path") and info.get("photo_path"):
+                r["photo_path"] = info["photo_path"]
             if info["control_no"]:
                 r["id_control_no"] = info["control_no"]
                 r["id_valid_until"] = info["valid_until"]
@@ -3332,10 +3374,16 @@ def idgen_person_update(pid):
 
         birthdate = (body.get("birthdate") or "").strip()
         if birthdate:
-            try:
-                datetime.date.fromisoformat(birthdate)
-            except ValueError:
-                return _err("Birthdate must be a valid date.")
+            parsed_bdate = None
+            for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%d/%m/%Y", "%d-%m-%Y"):
+                try:
+                    parsed_bdate = datetime.datetime.strptime(birthdate[:10], fmt).date()
+                    break
+                except ValueError:
+                    pass
+            if parsed_bdate is None:
+                return _err("Birthdate must be a valid date in MM/DD/YYYY format.")
+            birthdate = parsed_bdate.isoformat()
         gender = db_id.normalize_gender(body.get("gender")) if "gender" in body else p["gender"]
         fca = db_id.remember_fca(
             conn, body.get("affiliated_fca")
@@ -3411,6 +3459,15 @@ def idgen_person_photo_upload(pid):
         conn.execute("UPDATE id_persons SET photo_path = ?, updated_at = ? "
                      "WHERE id = ?", (rel, db.now_iso(), pid))
         conn.commit()
+        if p["source_farmer_id"] or p["rsbsa_number"]:
+            try:
+                g.db.execute(
+                    "UPDATE farmers SET photo_path = ? WHERE id = ? OR "
+                    "(rsbsa_number = ? AND rsbsa_number != '')",
+                    (rel, p["source_farmer_id"] or -1, p["rsbsa_number"]))
+                g.db.commit()
+            except Exception:
+                pass
         _audit("id_db.photo_upload",
                f"ID photo uploaded for '{p['name']}' "
                f"(RSBSA {p['rsbsa_number']}) in the ID Generator database")
@@ -3536,7 +3593,7 @@ def idgen_import_csv():
             birthdate = None
             if birthdate_raw:
                 parsed_date = None
-                for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y"):
+                for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%d/%m/%Y", "%d-%m-%Y"):
                     try:
                         parsed_date = datetime.datetime.strptime(
                             birthdate_raw, fmt).date()
@@ -3647,28 +3704,28 @@ def idgen_copy_masterlist():
     added, skipped = [], []
     try:
         for fid in ids:
-            f = g.db.execute(
+            f_row = g.db.execute(
                 "SELECT f.* FROM farmers f WHERE f.id = ?",
                 (fid,)).fetchone()
-            if f is None:
+            if f_row is None:
                 skipped.append({"farmer_id": fid, "reason": "Not found"})
                 continue
-            rsbsa = (f["rsbsa_number"] or "").strip().upper()
+            f = dict(f_row)
+            rsbsa = (f.get("rsbsa_number") or "").strip().upper()
             if not rsbsa:
-                skipped.append({"farmer_id": fid, "name": f["name"],
+                skipped.append({"farmer_id": fid, "name": f.get("name"),
                                 "reason": "No RSBSA Number"})
                 continue
             if db_id.find_person_by_rsbsa(conn, rsbsa) is not None:
-                skipped.append({"farmer_id": fid, "name": f["name"],
+                skipped.append({"farmer_id": fid, "name": f.get("name"),
                                 "rsbsa": rsbsa, "reason": "Already in ID database"})
                 continue
             now = db.now_iso()
-            fkeys = f.keys() if hasattr(f, "keys") else []
-            gen_val = f["gender"] if "gender" in fkeys and f["gender"] else ""
-            bdate_val = f["birthdate"] if "birthdate" in fkeys and f["birthdate"] else ""
+            gen_val = f.get("gender") or ""
+            bdate_val = f.get("birthdate") or ""
             if not gen_val or not bdate_val:
                 try:
-                    d = json.loads(f["data_json"] or "{}")
+                    d = json.loads(f.get("data_json") or "{}")
                     if not gen_val:
                         gen_val = d.get("GENDER") or d.get("SEX") or d.get("KASARIAN") or ""
                     if not bdate_val:
@@ -3683,20 +3740,20 @@ def idgen_copy_masterlist():
                 if brow:
                     bgy_name = brow["name"]
             fca_val = db_id.remember_fca(
-                conn, f["affiliated_fca"] if "affiliated_fca" in f.keys() else "")
+                conn, f.get("affiliated_fca") or "")
             cur = conn.execute(
                 "INSERT INTO id_persons (rsbsa_key, rsbsa_number, name, "
                 "gender, civil_status, address, birthdate, contact_number, "
                 "emergency_contact, affiliated_fca, barangay, photo_path, source, "
                 "source_farmer_id, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'masterlist', ?, ?, ?)",
-                (db_id.rsbsa_key(rsbsa), rsbsa, f["name"], norm_gen,
-                 db_id.normalize_civil_status(f["civil_status"]),
-                 f["address"], bdate_val or None,
-                 f["contact_number"], f["emergency_contact"],
+                (db_id.rsbsa_key(rsbsa), rsbsa, f.get("name"), norm_gen,
+                 db_id.normalize_civil_status(f.get("civil_status")),
+                 f.get("address"), bdate_val or None,
+                 f.get("contact_number"), f.get("emergency_contact"),
                  fca_val or None, bgy_name, None, fid, now, now))
             pid = cur.lastrowid
-            if f["photo_path"]:
+            if f.get("photo_path"):
                 src = os.path.join(db.INSTANCE_DIR, f["photo_path"])
                 if os.path.exists(src):
                     ext = os.path.splitext(src)[1].lower() or ".jpg"
@@ -3708,7 +3765,7 @@ def idgen_copy_masterlist():
                     except Exception:
                         pass
             added.append({"farmer_id": fid, "id_person_id": pid,
-                          "name": f["name"], "rsbsa": rsbsa})
+                          "name": f.get("name"), "rsbsa": rsbsa})
         conn.commit()
     finally:
         conn.close()
